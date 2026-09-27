@@ -171,6 +171,7 @@ public sealed partial class CSharpSymbolCollector
                 var symbol = AddMember(ctor, SymbolKind.Constructor, ctor.Name, $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(ctor.Parameters, scope.TypeParameters, Resolver(scope))}", scope, ctor.Span.Start);
                 if (symbol != null)
                 {
+                    _binder.RegisterMember(symbol, scope.Context, null, ctor.Parameters);
                     SetParameters(symbol, ctor.Parameters);
                     symbol.Signature = $"{scope.Type?.Name ?? ctor.Name}({ParameterText(ctor.Parameters)})";
                 }
@@ -197,6 +198,7 @@ public sealed partial class CSharpSymbolCollector
                 if (symbol != null)
                 {
                     symbol.Type = Text(p.Type);
+                    _binder.RegisterMember(symbol, scope.Context, p.Type, null);
                     symbol.Signature = $"{symbol.Type} {Owner(scope)}{InterfacePrefix(p.ExplicitInterface)}{p.Name} {AccessorText(p.Accessors, p.ExpressionBody != null)}";
                 }
 
@@ -212,6 +214,7 @@ public sealed partial class CSharpSymbolCollector
                 if (symbol != null)
                 {
                     symbol.Type = Text(indexer.Type);
+                    _binder.RegisterMember(symbol, scope.Context, indexer.Type, indexer.Parameters);
                     SetParameters(symbol, indexer.Parameters);
                     symbol.Signature = $"{symbol.Type} {Owner(scope)}{InterfacePrefix(indexer.ExplicitInterface)}this[{ParameterText(indexer.Parameters)}] {AccessorText(indexer.Accessors, indexer.ExpressionBody != null)}";
                 }
@@ -226,6 +229,7 @@ public sealed partial class CSharpSymbolCollector
                     if (symbol != null)
                     {
                         symbol.Type = Text(field.Type);
+                        _binder.RegisterMember(symbol, scope.Context, field.Type, null);
                         symbol.Signature = $"{symbol.Type} {Owner(scope)}{variable.Name}";
                     }
                 }
@@ -241,6 +245,7 @@ public sealed partial class CSharpSymbolCollector
                     if (symbol != null)
                     {
                         symbol.Type = Text(e.Type);
+                        _binder.RegisterMember(symbol, scope.Context, e.Type, null);
                         symbol.Signature = $"event {symbol.Type} {Owner(scope)}{InterfacePrefix(e.ExplicitInterface)}{variable.Name}";
                     }
                 }
@@ -257,6 +262,7 @@ public sealed partial class CSharpSymbolCollector
                 if (symbol != null)
                 {
                     symbol.Type = Text(op.ReturnType);
+                    _binder.RegisterMember(symbol, scope.Context, op.ReturnType, op.Parameters);
                     SetParameters(symbol, op.Parameters);
                     symbol.Signature = $"{symbol.Type} {Owner(scope)}operator {op.Operator}({ParameterText(op.Parameters)})";
                 }
@@ -274,6 +280,7 @@ public sealed partial class CSharpSymbolCollector
                 if (symbol != null)
                 {
                     symbol.Type = Text(conversion.Type);
+                    _binder.RegisterMember(symbol, scope.Context, conversion.Type, conversion.Parameters);
                     SetParameters(symbol, conversion.Parameters);
                     symbol.Signature = $"{Owner(scope)}{keyword} operator {symbol.Type}({ParameterText(conversion.Parameters)})";
                 }
@@ -349,12 +356,19 @@ public sealed partial class CSharpSymbolCollector
         {
             var existing = _builder.Get(id)!;
             var nestedScope = NestedScope(scope, existing, typeParameters);
-            if (_pass == CollectPass.References)
+            if (_pass == CollectPass.Members)
             {
-                WalkType(type, nestedScope, existing);
+                _binder.RegisterTypeConstraints(existing, nestedScope.Context, TypeConstraints(type));
+                AddPrimaryConstructor(type, kind, name, existing, primaryConstructorParameters, members, nestedScope);
+                VisitMembers(members, nestedScope);
+                return;
             }
 
+            var savedTypeLocals = _typeLocals;
+            EnterType(kind, existing, primaryConstructorParameters, nestedScope);
+            WalkType(type, nestedScope, existing);
             VisitMembers(members, nestedScope);
+            _typeLocals = savedTypeLocals;
             return;
         }
 
@@ -405,6 +419,68 @@ public sealed partial class CSharpSymbolCollector
         VisitMembers(members, inner);
     }
 
+    private static IReadOnlyList<TypeParameterConstraint>? TypeConstraints(TypeDeclaration type) => type switch
+    {
+        ClassDeclaration c => c.Constraints,
+        StructDeclaration s => s.Constraints,
+        InterfaceDeclaration i => i.Constraints,
+        RecordDeclaration r => r.Constraints,
+        _ => null,
+    };
+
+    /// <summary>
+    /// The members a primary constructor declares: the constructor, and for a record a property for each parameter
+    /// the record does not declare itself.
+    /// </summary>
+    private void AddPrimaryConstructor(TypeDeclaration type, SymbolKind kind, string name, CodeSymbol symbol, IReadOnlyList<Parameter>? parameters, IReadOnlyList<MemberDeclaration>? members, Scope scope)
+    {
+        if (parameters == null)
+        {
+            return;
+        }
+
+        var nameOffset = FindName(name, AttributesEnd(type), type.Span.End);
+        var ctor = _builder.GetOrAdd($"M:{scope.Qualify("#ctor")}{DocumentationIds.ParameterList(parameters, scope.TypeParameters, Resolver(scope))}", SymbolKind.Constructor, name, symbol, out var created);
+        if (created)
+        {
+            ctor.Namespace = scope.Namespace?.Id[2..];
+            ctor.Project = _source.Project;
+            ctor.Accessibility = kind is SymbolKind.Record or SymbolKind.RecordStruct || !type.Modifiers.HasFlag(Modifiers.Abstract) ? "public" : "protected";
+            SetParameters(ctor, parameters);
+            ctor.Signature = $"{name}({ParameterText(parameters)})";
+            _binder.RegisterMember(ctor, scope.Context, null, parameters);
+            AddLocation(ctor, type.Span, nameOffset);
+        }
+
+        if (kind is not (SymbolKind.Record or SymbolKind.RecordStruct))
+        {
+            return;
+        }
+
+        foreach (var parameter in parameters)
+        {
+            var declared = members?.Any(m => m is PropertyDeclaration { ExplicitInterface: null } p && p.Name == parameter.Name
+                || m is FieldDeclaration f && f.Variables.Any(v => v.Name == parameter.Name)) ?? false;
+            if (declared || string.IsNullOrEmpty(parameter.Name))
+            {
+                continue;
+            }
+
+            var property = _builder.GetOrAdd($"P:{scope.Qualify(parameter.Name)}", SymbolKind.Property, parameter.Name, symbol, out var added);
+            if (added)
+            {
+                property.Namespace = scope.Namespace?.Id[2..];
+                property.Project = _source.Project;
+                property.Accessibility = "public";
+                property.Type = Text(parameter.Type);
+                var accessors = kind == SymbolKind.Record || type.Modifiers.HasFlag(Modifiers.Readonly) ? "{ get; init; }" : "{ get; set; }";
+                property.Signature = $"{property.Type} {symbol.QualifiedDisplayName()}.{parameter.Name} {accessors}";
+                _binder.RegisterMember(property, scope.Context, parameter.Type, null);
+                AddLocation(property, parameter.Span, FindName(parameter.Name, parameter.Type?.Span.End ?? parameter.Span.Start, parameter.Span.End));
+            }
+        }
+    }
+
     private static Scope NestedScope(Scope scope, CodeSymbol type, IReadOnlyList<TypeParameter>? typeParameters)
     {
         var map = new Dictionary<string, string>(scope.TypeParameters.Where(p => !p.Value.StartsWith("``", StringComparison.Ordinal)), StringComparer.Ordinal);
@@ -432,12 +508,15 @@ public sealed partial class CSharpSymbolCollector
         if (_pass == CollectPass.References)
         {
             var inner = scope with { Type = symbol };
+            var savedTypeLocals = _typeLocals;
+            EnterType(SymbolKind.Enum, symbol, null, inner);
             WalkType(e, inner, symbol);
             foreach (var member in e.Members ?? [])
             {
                 WalkNode(member, inner.Context, $"F:{symbol.Id[2..]}.{member.Name}");
             }
 
+            _typeLocals = savedTypeLocals;
             return;
         }
 
@@ -477,6 +556,7 @@ public sealed partial class CSharpSymbolCollector
         var symbol = AddMember(d, SymbolKind.Delegate, d.Name, id, scope, After(d.ReturnType, d));
 
         symbol.Type = Text(d.ReturnType);
+        _binder.RegisterMember(symbol, NestedScope(scope, symbol, d.TypeParameters).Context with { Type = scope.Type }, d.ReturnType, d.Parameters);
         SetParameters(symbol, d.Parameters);
         if (symbol.TypeParameters.Count == 0 && d.TypeParameters != null)
         {
@@ -525,6 +605,7 @@ public sealed partial class CSharpSymbolCollector
         }
 
         symbol.Type = Text(m.ReturnType);
+        _binder.RegisterMember(symbol, scope.Context with { TypeParameters = map }, m.ReturnType, m.Parameters, m.Constraints);
         SetParameters(symbol, m.Parameters);
         if (symbol.TypeParameters.Count == 0 && m.TypeParameters != null)
         {

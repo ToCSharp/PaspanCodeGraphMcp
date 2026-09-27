@@ -155,7 +155,7 @@ public sealed record BoundName(string? Namespace, BoundType? Type);
 /// imported namespaces and the nested types of <c>using static</c> types. Only workspace types are found;
 /// other names stay unbound.
 /// </summary>
-public sealed class CSharpBinder
+public sealed partial class CSharpBinder
 {
     private readonly SymbolIndexBuilder _builder;
     private readonly Dictionary<string, ImportScope> _projectScopes = new(StringComparer.Ordinal);

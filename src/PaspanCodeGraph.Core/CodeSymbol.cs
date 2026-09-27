@@ -51,8 +51,17 @@ public enum Confidence
     /// <summary>Bound by name lookup as the compiler does it.</summary>
     Exact,
 
-    /// <summary>Most likely right; a same-named local, parameter or member could hide it.</summary>
+    /// <summary>
+    /// Most likely right: the receiver's type or the overload was inferred (a lambda parameter from a LINQ
+    /// operator, arguments of unknown types), or a same-named local could hide a type.
+    /// </summary>
     Inferred,
+
+    /// <summary>
+    /// Only the name matches: the receiver's type is unknown, and this is one of the workspace members with that
+    /// name and a matching number of parameters.
+    /// </summary>
+    NameOnly,
 }
 
 /// <summary>A place in source that refers to a symbol.</summary>

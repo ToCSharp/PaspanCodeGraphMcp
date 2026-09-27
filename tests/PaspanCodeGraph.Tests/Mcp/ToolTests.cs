@@ -110,11 +110,16 @@ public sealed class ToolTests
     [TestMethod]
     public async Task GoToDefinition_ByPosition_OnNameAndInsideBody()
     {
-        // "    public static int Parse(string text) => Parse(text, 10);" is line 12 of Lib/Parser.cs
+        // "        public static int Parse(string text) => Parse(text, 10);" is line 12 of Lib/Parser.cs
         var onName = (DefinitionResult)await NavigationTools.GoToDefinition(_host, "Lib/Parser.cs:12:25");
         Assert.AreEqual("M:Lib.Parser.Parse(System.String)", onName.Symbol.Id);
 
-        var inBody = (DefinitionResult)await NavigationTools.GoToDefinition(_host, "Parser.cs:12:50");
+        // On a call: the overload called
+        var onCall = (DefinitionResult)await NavigationTools.GoToDefinition(_host, "Parser.cs:12:50");
+        Assert.AreEqual("M:Lib.Parser.Parse(System.String,System.Int32)", onCall.Symbol.Id);
+
+        // Elsewhere in a body: the member containing it
+        var inBody = (DefinitionResult)await NavigationTools.GoToDefinition(_host, "Parser.cs:12:61");
         Assert.AreEqual("M:Lib.Parser.Parse(System.String)", inBody.Symbol.Id);
     }
 

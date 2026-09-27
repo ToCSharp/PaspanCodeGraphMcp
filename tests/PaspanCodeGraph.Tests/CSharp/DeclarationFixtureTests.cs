@@ -155,6 +155,18 @@ public sealed class DeclarationFixtureTests
     {
         var roslynIds = _roslyn.Select(r => r.Symbol.GetDocumentationCommentId()).ToHashSet();
 
+        // Primary constructors and the properties of positional records are declared by the type's parameter list
+        foreach (var type in _roslyn.Select(r => r.Symbol).OfType<INamedTypeSymbol>().Distinct(SymbolEqualityComparer.Default).Cast<INamedTypeSymbol>())
+        {
+            foreach (var member in type.GetMembers().Where(m => !m.IsImplicitlyDeclared && m is not INamedTypeSymbol))
+            {
+                if (member.DeclaringSyntaxReferences.Any(r => r.GetSyntax() is ParameterSyntax or TypeDeclarationSyntax))
+                {
+                    roslynIds.Add(member.GetDocumentationCommentId());
+                }
+            }
+        }
+
         // Members of extension blocks are recorded as members of the static class; Roslyn declares them in the block
         var missing = roslynIds.Where(id => !_ours.ContainsKey(id) && !id.Contains("<G>", StringComparison.Ordinal) && !id.Contains("$", StringComparison.Ordinal)).Order().ToList();
         var extra = _ours.Keys.Where(id => !roslynIds.Contains(id) && !IsExtensionBlockMember(id)).Order().ToList();

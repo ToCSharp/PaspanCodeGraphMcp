@@ -31,27 +31,128 @@ public sealed partial class CSharpSymbolCollector
                 var name = DocumentationIds.MemberName(m.Name, m.ExplicitInterface, scope.TypeParameters, Resolver(scope));
                 var arity = m.TypeParameters?.Count ?? 0;
                 var id = $"M:{scope.Qualify(name)}{(arity > 0 ? "``" + arity : "")}{DocumentationIds.ParameterList(m.Parameters, map, Resolver(scope, map))}";
-                WalkNode(m, scope.Context with { TypeParameters = map }, id);
+                var context = scope.Context with { TypeParameters = map };
+                var symbol = _builder.Get(id);
+                var returnType = _binder.ToSemType(m.ReturnType, context, symbol);
+                if (m.Modifiers.HasFlag(Modifiers.Async))
+                {
+                    returnType = SemTypes.Awaited(returnType) ?? SemType.Unknown;
+                }
+
+                EnterMember(scope, symbol, m.Parameters, map, returnType);
+                PreBind(m.Body, context, id, returnType);
+                WalkNode(m, context, id);
                 break;
             }
 
             case FieldDeclaration field when field.Variables.Count > 0:
-                WalkNode(field, scope.Context, $"F:{scope.Qualify(field.Variables[0].Name)}");
+            {
+                var id = $"F:{scope.Qualify(field.Variables[0].Name)}";
+                EnterMember(scope, _builder.Get(id), null, scope.TypeParameters, SemType.Unknown);
+                var type = _binder.ToSemType(field.Type, scope.Context, null);
+                foreach (var variable in field.Variables)
+                {
+                    Bind(variable.Initializer, scope.Context, id, type);
+                }
+
+                WalkNode(field, scope.Context, id);
                 break;
+            }
 
             case EventDeclaration e when e.Variables.Count > 0:
-                WalkNode(e, scope.Context, $"E:{scope.Qualify(DocumentationIds.MemberName(e.Variables[0].Name, e.ExplicitInterface, scope.TypeParameters, Resolver(scope)))}");
+            {
+                var id = $"E:{scope.Qualify(DocumentationIds.MemberName(e.Variables[0].Name, e.ExplicitInterface, scope.TypeParameters, Resolver(scope)))}";
+                var type = _binder.ToSemType(e.Type, scope.Context, null);
+                EnterMember(scope, _builder.Get(id), null, scope.TypeParameters, SemType.Void, value: type);
+                foreach (var variable in e.Variables)
+                {
+                    Bind(variable.Initializer, scope.Context, id, type);
+                }
+
+                WalkNode(e, scope.Context, id);
                 break;
+            }
 
             case GlobalStatement:
             case IncompleteMemberDeclaration:
+                EnterMember(scope, null, null, scope.TypeParameters, SemType.Unknown);
                 WalkNode(member, scope.Context, null);
                 break;
 
             default:
+            {
                 // Constructors, properties, indexers, operators, destructors: the id as the Members pass builds it
-                WalkNode(member, scope.Context, MemberId(member, scope));
+                var id = MemberId(member, scope);
+                var symbol = id != null ? _builder.Get(id) : null;
+                switch (member)
+                {
+                    case PropertyDeclaration p:
+                    {
+                        var type = _binder.ToSemType(p.Type, scope.Context, null);
+                        EnterMember(scope, symbol, null, scope.TypeParameters, type, value: type);
+                        Bind(p.ExpressionBody, scope.Context, id, type);
+                        Bind(p.Initializer, scope.Context, id, type);
+                        PreBindAccessors(p.Accessors, scope.Context, id, type);
+                        break;
+                    }
+
+                    case IndexerDeclaration indexer:
+                    {
+                        var type = _binder.ToSemType(indexer.Type, scope.Context, null);
+                        EnterMember(scope, symbol, indexer.Parameters, scope.TypeParameters, type, value: type);
+                        Bind(indexer.ExpressionBody, scope.Context, id, type);
+                        PreBindAccessors(indexer.Accessors, scope.Context, id, type);
+                        break;
+                    }
+
+                    case ConstructorDeclaration ctor:
+                        EnterMember(scope, symbol, ctor.Parameters, scope.TypeParameters, SemType.Void);
+                        break;
+
+                    case OperatorDeclaration op:
+                    {
+                        var type = _binder.ToSemType(op.ReturnType, scope.Context, null);
+                        EnterMember(scope, symbol, op.Parameters, scope.TypeParameters, type);
+                        PreBind(op.Body, scope.Context, id, type);
+                        break;
+                    }
+
+                    case ConversionOperatorDeclaration conversion:
+                    {
+                        var type = _binder.ToSemType(conversion.Type, scope.Context, null);
+                        EnterMember(scope, symbol, conversion.Parameters, scope.TypeParameters, type);
+                        PreBind(conversion.Body, scope.Context, id, type);
+                        break;
+                    }
+
+                    default:
+                        EnterMember(scope, symbol, null, scope.TypeParameters, SemType.Void);
+                        break;
+                }
+
+                WalkNode(member, scope.Context, id);
                 break;
+            }
+        }
+    }
+
+    /// <summary>Binds an expression body first, with the type it converts to (the walk then finds it bound).</summary>
+    private void PreBind(PaspanParsers.CSharp.MethodBody? body, BindingContext context, string? inMember, SemType type)
+    {
+        if (body is ExpressionMethodBody expression && type != SemType.Void)
+        {
+            Bind(expression.Expression, context, inMember, type.IsUnknown ? null : type);
+        }
+    }
+
+    private void PreBindAccessors(IReadOnlyList<Accessor>? accessors, BindingContext context, string? inMember, SemType type)
+    {
+        foreach (var accessor in accessors ?? [])
+        {
+            if (accessor.Kind == AccessorKind.Get)
+            {
+                PreBind(accessor.Body, context, inMember, type);
+            }
         }
     }
 
@@ -74,7 +175,7 @@ public sealed partial class CSharpSymbolCollector
         var outside = inner.Context with { Type = symbol.ContainingType };
         foreach (var child in Children(type))
         {
-            if (child is IEnumerable<MemberDeclaration> or IEnumerable<EnumMember>)
+            if (child is IEnumerable<MemberDeclaration> or IEnumerable<EnumMember> or IEnumerable<Argument>)
             {
                 continue;
             }
@@ -91,6 +192,8 @@ public sealed partial class CSharpSymbolCollector
 
             WalkChild(child, inner.Context, symbol.Id);
         }
+
+        BindBaseArguments(type, inner.Context, symbol);
     }
 
     private void WalkAttributes(IReadOnlyList<AttributeSection>? attributes, Scope scope, string? inMember)
@@ -148,8 +251,13 @@ public sealed partial class CSharpSymbolCollector
         }
     }
 
-    private void WalkNode(CSharpNode node, BindingContext context, string? inMember)
+    private void WalkNode(CSharpNode? node, BindingContext context, string? inMember)
     {
+        if (node == null)
+        {
+            return;
+        }
+
         switch (node)
         {
             case NamedTypeReference named:
@@ -163,49 +271,35 @@ public sealed partial class CSharpSymbolCollector
                 return;
 
             case AttributeNode attribute:
-                RecordDottedName(attribute.Name, context, inMember, attribute: true);
-                WalkChild(attribute.Name.TypeArguments, context, inMember);
-                WalkChild(attribute.Arguments, context, inMember);
-                return;
-
-            case NameExpression name:
-                BindExpression(name, context, inMember);
-                WalkChild(name.TypeArguments, context, inMember);
-                return;
-
-            case InvocationExpression { Expression: NameExpression { Parts.Count: 1, Alias: null } invoked } invocation:
-                // An invoked simple name is a method or a delegate, never a type
-                WalkChild(invoked.TypeArguments, context, inMember);
-                WalkChild(invocation.Arguments, context, inMember);
-                return;
-
-            case MemberAccessExpression access:
-                BindExpression(access, context, inMember);
-                if (access.Target != null)
-                {
-                    WalkNode(access.Target, context, inMember);
-                }
-
-                WalkChild(access.TypeArguments, context, inMember);
-                return;
-
-            case LocalFunctionStatement { TypeParameters.Count: > 0 } local:
             {
-                // Its type parameters hide types of the same name
-                var map = new Dictionary<string, string>(context.TypeParameters, StringComparer.Ordinal);
-                foreach (var parameter in local.TypeParameters)
-                {
-                    map[parameter.Name] = parameter.Name;
-                }
-
-                var inner = context with { TypeParameters = map };
-                foreach (var child in Children(node))
-                {
-                    WalkChild(child, inner, inMember);
-                }
-
+                var bound = RecordDottedName(attribute.Name, context, inMember, attribute: true);
+                WalkChild(attribute.Name.TypeArguments, context, inMember);
+                BindAttribute(attribute, bound?.Type?.Symbol, context, inMember);
                 return;
             }
+
+            case Statement statement:
+                WalkStatement(statement, context, inMember);
+                return;
+
+            case Expression expression:
+                Bind(expression, context, inMember);
+                return;
+
+            case Pattern pattern:
+                BindPattern(pattern, SemType.Unknown, context, inMember);
+                return;
+
+            case ConstructorInitializer initializer:
+                BindConstructorInitializer(initializer, context, inMember);
+                return;
+
+            case Parameter parameter:
+                // A default value converts to the parameter's type
+                WalkChild(parameter.Attributes, context, inMember);
+                WalkChild(parameter.Type, context, inMember);
+                Bind(parameter.DefaultValue, context, inMember, parameter.Type is null ? null : _binder.ToSemType(parameter.Type, context, _method));
+                return;
         }
 
         foreach (var child in Children(node))
@@ -252,7 +346,7 @@ public sealed partial class CSharpSymbolCollector
     }
 
     /// <summary>A dotted name of a using or an attribute; an attribute name may leave out its <c>Attribute</c> suffix.</summary>
-    private void RecordDottedName(NameExpression name, BindingContext context, string? inMember, bool attribute)
+    private BoundName? RecordDottedName(NameExpression name, BindingContext context, string? inMember, bool attribute)
     {
         var parts = name.Parts;
         var position = name.Span.Start;
@@ -270,9 +364,11 @@ public sealed partial class CSharpSymbolCollector
             position = Record(current, parts[i], position, name.Span.End, inMember, Confidence.Exact);
             if (current == null)
             {
-                return;
+                return null;
             }
         }
+
+        return current;
     }
 
     /// <summary>
