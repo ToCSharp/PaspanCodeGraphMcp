@@ -103,8 +103,8 @@ public sealed class CodeSymbol
     }
 
     /// <summary>
-    /// Documentation-comment id (<c>T:Ns.Type`1</c>, <c>M:Ns.Type.Method(System.Int32)</c>). Parameter types
-    /// that are not predefined types or type parameters are written as in source, not fully qualified.
+    /// Documentation-comment id (<c>T:Ns.Type`1</c>, <c>M:Ns.Type.Method(System.Int32)</c>). Parameter types are
+    /// fully qualified when they are workspace types or types of the referenced assemblies, else written as in source.
     /// </summary>
     public string Id { get; }
 
@@ -123,6 +123,11 @@ public sealed class CodeSymbol
 
     /// <summary>The project that declares the symbol (the first one for files linked into several projects).</summary>
     public string? Project { get; set; }
+
+    /// <summary>For a type or member of a referenced assembly, the assembly's name; null for a workspace symbol.</summary>
+    public string? Assembly { get; set; }
+
+    public bool IsExternal => Assembly != null;
 
     public string Accessibility { get; set; } = "";
 

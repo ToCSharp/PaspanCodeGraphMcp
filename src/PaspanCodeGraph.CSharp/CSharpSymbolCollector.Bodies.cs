@@ -138,7 +138,7 @@ public sealed partial class CSharpSymbolCollector
 
     private void BindConstructorCall(SemType type, List<ArgumentInfo> arguments, int position, BindingContext context, string? inMember, bool exact)
     {
-        if (type.Underlying is NamedType named && _binder.Constructors(named) is { Count: > 0 } constructors && Resolve(constructors, arguments, [], null, context) is { } chosen)
+        if (_binder.Constructors(type) is { Count: > 0 } constructors && Resolve(constructors, arguments, [], null, context) is { } chosen)
         {
             CompleteArguments(chosen, arguments, context, inMember);
             RecordResolved(chosen, position, inMember, exact);
@@ -172,7 +172,7 @@ public sealed partial class CSharpSymbolCollector
             var found = _binder.LookupMembers(selfType, argument.Name).FirstOrDefault(m => m.Symbol.Kind is SymbolKind.Property or SymbolKind.Field);
             if (found != null)
             {
-                RecordReference(found.Symbol.Id, FindName(argument.Name, argument.Span.Start, argument.Span.End), inMember, Confidence.Exact);
+                RecordReference(TargetId(found.Symbol), FindName(argument.Name, argument.Span.Start, argument.Span.End), inMember, Confidence.Exact);
                 memberType = _binder.MemberType(found.Symbol);
             }
 
@@ -517,7 +517,7 @@ public sealed partial class CSharpSymbolCollector
             return element;
         }
 
-        if (collection.Underlying is NamedType or TypeParameterType)
+        if (collection.Underlying is NamedType or TypeParameterType || _binder.SymbolOf(collection.Underlying) != null)
         {
             foreach (var ancestor in _binder.Ancestors(collection))
             {
@@ -689,7 +689,7 @@ public sealed partial class CSharpSymbolCollector
                 return SemTypes.KnownProperty(type, name) ?? SemType.Unknown;
             }
 
-            RecordReference(found.Symbol.Id, offset, inMember, Confidence.Exact);
+            RecordReference(TargetId(found.Symbol), offset, inMember, Confidence.Exact);
             type = found.Substitute(_binder.MemberType(found.Symbol));
         }
 
@@ -1004,11 +1004,11 @@ public sealed partial class CSharpSymbolCollector
     }
 
     /// <summary>A name that bound to a type or namespace (recorded by <see cref="BindExpression"/>); else a type from a reference.</summary>
-    private static Bound AsTypeOrNamespace(BoundName? bound, Expression expression)
+    private Bound AsTypeOrNamespace(BoundName? bound, Expression expression)
     {
         if (bound?.Type is { } type)
         {
-            return new Bound(new TypeExpressionType(new NamedType(type.Symbol, [])), true);
+            return new Bound(new TypeExpressionType(_binder.TypeOf(type.Symbol, [])), true);
         }
 
         if (bound?.Namespace is { } ns)
@@ -1091,7 +1091,7 @@ public sealed partial class CSharpSymbolCollector
         var value = found.FirstOrDefault(f => f.Symbol.Kind is not SymbolKind.Method);
         if (value != null)
         {
-            RecordReference(value.Symbol.Id, FindName(name, start, end), inMember, receiverExact ? Confidence.Exact : Confidence.Inferred);
+            RecordReference(TargetId(value.Symbol), FindName(name, start, end), inMember, receiverExact ? Confidence.Exact : Confidence.Inferred);
             return new Bound(value.Substitute(_binder.MemberType(value.Symbol)), receiverExact);
         }
 
@@ -1124,7 +1124,7 @@ public sealed partial class CSharpSymbolCollector
             && _binder.ColorColor(colorName.Parts[0], name, context) is { Type: { } colorType } colorBound)
         {
             Record(colorBound, colorName.Parts[0], colorName.Span.Start, colorName.Span.End, inMember, Confidence.Inferred);
-            _bound[access.Target] = target = new Bound(new TypeExpressionType(new NamedType(colorType.Symbol, [])), true);
+            _bound[access.Target] = target = new Bound(new TypeExpressionType(_binder.TypeOf(colorType.Symbol, [])), true);
         }
         else
         {
@@ -1136,11 +1136,11 @@ public sealed partial class CSharpSymbolCollector
         switch (target.Type)
         {
             case NamespaceExpressionType:
-            case TypeExpressionType { Type: NamedType }:
+            case TypeExpressionType { Type: var typeExpression } when _binder.SymbolOf(typeExpression) != null:
             {
-                if (target.Type is TypeExpressionType { Type: NamedType staticType })
+                if (target.Type is TypeExpressionType { Type: var staticType } && _binder.SymbolOf(staticType) is { } staticSymbol)
                 {
-                    if (_binder.FindNestedType(staticType.Symbol, name, arity) == null)
+                    if (_binder.FindNestedType(staticSymbol.Symbol, name, arity) == null)
                     {
                         var found = _binder.LookupMembers(staticType, name);
                         if (found.Count > 0)
@@ -1209,11 +1209,20 @@ public sealed partial class CSharpSymbolCollector
                 var offset = FindName(name, nameStart, nameEnd);
                 if (SemTypes.KnownProperty(receiver, name) is { } property)
                 {
-                    RecordExternal("P:" + Describe(receiver) + "." + name, offset, inMember);
+                    // A tuple element is a field of the tuple, not a member worth a reference
+                    if (receiver.Underlying is not TupleType)
+                    {
+                        RecordExternal("P:" + Describe(receiver) + "." + name, offset, inMember);
+                    }
+
                     return new Bound(property, target.Exact);
                 }
 
-                RecordExternal("P:" + Describe(receiver) + "." + name, offset, inMember);
+                if (receiver.Underlying is not TupleType)
+                {
+                    RecordExternal("P:" + Describe(receiver) + "." + name, offset, inMember);
+                }
+
                 return Bound.Unknown;
             }
         }
@@ -1236,7 +1245,7 @@ public sealed partial class CSharpSymbolCollector
         var target = Bind(element.Target, context, inMember);
         var arguments = BindArguments(element.Arguments, context, inMember);
         var bracket = FindPunctuation((byte)'[', element.Target?.Span.End ?? element.Span.Start, element.Span.End);
-        var indexers = target.Type.Underlying is NamedType or TypeParameterType ? _binder.LookupIndexers(target.Type) : [];
+        var indexers = target.Type.Underlying is TypeParameterType || _binder.SymbolOf(target.Type.Underlying) != null ? _binder.LookupIndexers(target.Type) : [];
         if (indexers.Count > 0)
         {
             var resolution = Resolve(indexers, arguments, [], null, context);
@@ -1245,6 +1254,23 @@ public sealed partial class CSharpSymbolCollector
                 CompleteArguments(chosen, arguments, context, inMember);
                 RecordResolved(chosen, bracket, inMember, target.Exact);
                 return new Bound(chosen.Substitute(_binder.MemberType(chosen.Member.Symbol)), target.Exact && chosen.Unique);
+            }
+
+            // A range or a from-end index on a type without such an indexer: Slice (Substring for a string), or the int indexer
+            if (arguments is [{ Bound.Type: ExternalType { Name: "Range" or "Index", Arguments.Count: 0 } implicitArgument }])
+            {
+                var isRange = implicitArgument.Name == "Range";
+                var candidates = isRange
+                    ? _binder.LookupMembers(target.Type, target.Type.Underlying is ExternalType { Name: "String" } ? "Substring" : "Slice")
+                    : indexers;
+                var implicitMember = candidates.FirstOrDefault(c => _binder.Parameters(c.Symbol) is var p
+                    && (isRange ? p.Count == 2 : p.Count == 1) && p.All(x => Equals(x.Type, SemTypes.Int32)));
+                if (implicitMember != null)
+                {
+                    CompleteArguments(null, arguments, context, inMember);
+                    RecordReference(TargetId(implicitMember.Symbol), bracket, inMember, target.Exact ? Confidence.Exact : Confidence.Inferred);
+                    return new Bound(implicitMember.Substitute(_binder.MemberType(implicitMember.Symbol)), target.Exact);
+                }
             }
         }
 
@@ -1362,9 +1388,9 @@ public sealed partial class CSharpSymbolCollector
             null => creation.Span.Start,
             _ => creation.Type.Span.Start,
         };
-        if (type.Underlying is NamedType { Symbol.Kind: not SymbolKind.Delegate } named2)
+        if (_binder.SymbolOf(type.Underlying) is { Symbol.Kind: not SymbolKind.Delegate })
         {
-            var constructors = _binder.Constructors(named2);
+            var constructors = _binder.Constructors(type);
             if (constructors.Count > 0 && Resolve(constructors, arguments, [], null, context) is { } chosen)
             {
                 CompleteArguments(chosen, arguments, context, inMember);
@@ -1375,7 +1401,7 @@ public sealed partial class CSharpSymbolCollector
                 CompleteArguments(null, arguments, context, inMember);
             }
         }
-        else if (type.Underlying is NamedType { Symbol.Kind: SymbolKind.Delegate })
+        else if (_binder.SymbolOf(type.Underlying) is { Symbol.Kind: SymbolKind.Delegate })
         {
             CompleteArguments(null, arguments, context, inMember, [type]);
         }
@@ -1416,7 +1442,7 @@ public sealed partial class CSharpSymbolCollector
                         var found = _binder.LookupMembers(type, memberName.Parts[0]).FirstOrDefault(m => m.Symbol.Kind is not SymbolKind.Method);
                         if (found != null)
                         {
-                            RecordReference(found.Symbol.Id, FindName(memberName.Parts[0], left.Span.Start, left.Span.End), inMember, Confidence.Exact);
+                            RecordReference(TargetId(found.Symbol), FindName(memberName.Parts[0], left.Span.Start, left.Span.End), inMember, Confidence.Exact);
                             memberType = found.Substitute(_binder.MemberType(found.Symbol));
                         }
 
@@ -1727,7 +1753,14 @@ public sealed partial class CSharpSymbolCollector
                 CompleteArguments(extension, args, context, inMember);
                 var exact = receiver.Exact && extension.Unique;
                 RecordResolved(extension, offset, inMember, receiver.Exact);
-                return new Bound(extension.Substitute(_binder.MemberType(extension.Member.Symbol)), exact);
+                var returned = extension.Substitute(_binder.MemberType(extension.Member.Symbol));
+                if ((returned.IsUnknown || SemTypes.HasTypeParameters(returned)) && SemTypes.KnownMethod(receiver.Type, name) is { } known)
+                {
+                    // The type arguments were not all inferred: the base class library model may know the result
+                    returned = known.Result(null) is { IsUnknown: false } fromModel && !SemTypes.HasTypeParameters(fromModel) ? fromModel : returned;
+                }
+
+                return new Bound(returned, exact);
             }
         }
 
@@ -1765,7 +1798,11 @@ public sealed partial class CSharpSymbolCollector
         }
 
         CompleteArguments(null, args, context, inMember);
-        RecordExternal("M:" + Describe(receiver.Type) + "." + name, offset, inMember);
+        if (receiver.Type.Underlying is not TupleType)
+        {
+            RecordExternal("M:" + Describe(receiver.Type) + "." + name, offset, inMember);
+        }
+
         return Bound.Unknown;
     }
 
@@ -1800,6 +1837,9 @@ public sealed partial class CSharpSymbolCollector
         }
 
         /// <summary>The declared type of the parameter the argument at <paramref name="argument"/> goes to, before substitution.</summary>
+        /// <summary>Whether the argument at <paramref name="argument"/> goes to a params parameter in its expanded form.</summary>
+        public bool IsExpanded(int argument) => expanded[argument];
+
         public SemType? DeclaredParameterType(int argument)
         {
             var index = parameterOf[argument];
@@ -1822,7 +1862,13 @@ public sealed partial class CSharpSymbolCollector
             switch (parameter)
             {
                 case TypeParameterType { IsMethod: true } p when p.Owner == method:
-                    inferred.TryAdd(p.Ordinal, argument is NullableType && p.Ordinal >= 0 ? argument : argument);
+                    if (!inferred.TryAdd(p.Ordinal, argument) && inferred[p.Ordinal] is var known && !Equals(known, argument)
+                        && binder.Conversion(known, argument) > 0 && binder.Conversion(argument, known) < 0)
+                    {
+                        // Several bounds: the type the others convert to (int and object give object)
+                        inferred[p.Ordinal] = argument;
+                    }
+
                     return;
                 case NullableType nullable:
                     Unify(nullable.Element, argument.Underlying, method, inferred, binder, depth + 1);
@@ -1862,6 +1908,24 @@ public sealed partial class CSharpSymbolCollector
                         }
 
                         return;
+                    }
+
+                    // A base type or interface of the argument's type from a reference
+                    if (argument.Underlying is ExternalType or NamedType)
+                    {
+                        foreach (var ancestor in binder.Ancestors(argument))
+                        {
+                            if (ancestor is ExternalType match && match.Name == external.Name && match.Arguments.Count == external.Arguments.Count
+                                && binder.DefinitionOf(match) is { } definition && definition == binder.DefinitionOf(external))
+                            {
+                                for (var i = 0; i < external.Arguments.Count; i++)
+                                {
+                                    Unify(external.Arguments[i], match.Arguments[i], method, inferred, binder, depth + 1);
+                                }
+
+                                return;
+                            }
+                        }
                     }
 
                     // IEnumerable<T> from any sequence
@@ -2052,9 +2116,16 @@ public sealed partial class CSharpSymbolCollector
                     conversion = -1;
                 }
 
-                if (arguments[i].Argument.Expression is CollectionExpression && _binder.DelegateSignature(parameterType) != null)
+                // A collection expression converts to collection types only
+                if (arguments[i].Argument.Expression is CollectionExpression && (_binder.DelegateSignature(parameterType) != null || SemTypes.IsPredefined(parameterType) && !Equals(parameterType, SemTypes.String) && !Equals(parameterType, SemTypes.Object)))
                 {
                     conversion = -1;
+                }
+
+                // An interpolated string goes to an interpolated string handler before a string
+                if (arguments[i].Argument.Expression is InterpolatedStringExpression && parameterType is ExternalType { Name: var handler } && handler.EndsWith("InterpolatedStringHandler", StringComparison.Ordinal))
+                {
+                    conversion = 3;
                 }
 
                 if (conversion < 0)
@@ -2090,7 +2161,34 @@ public sealed partial class CSharpSymbolCollector
             .ThenBy(a => a.Defaults)
             .ToList();
         var first = best[0];
+
+        // A better conversion target decides before genericity: IEnumerable<T> is better than IEnumerable
+        var top = best.Where(b => b.Score == first.Score).ToList();
+        if (top.Count > 1 && top.FirstOrDefault(t => top.All(o => o.Resolution == t.Resolution || MoreSpecific(t.Resolution, o.Resolution, arguments.Count))) is { Resolution: not null } better)
+        {
+            first = better;
+        }
+
         var tied = best.Where(b => b.Score == first.Score && b.Generic == first.Generic && b.Expanded == first.Expanded && b.Defaults == first.Defaults).ToList();
+        if (top.Count > 1 && first.Resolution != best[0].Resolution)
+        {
+            tied = [first];
+        }
+
+        // A collection expression or expanded params argument goes to a span before an array
+        if (tied.Count > 1)
+        {
+            bool Spans((Resolution Resolution, int, int, bool, bool, int) candidate) => Enumerable.Range(0, arguments.Count).Any(i =>
+                (arguments[i].Argument.Expression is CollectionExpression || candidate.Resolution.IsExpanded(i))
+                && candidate.Resolution.DeclaredParameterType(i)?.Underlying is ExternalType { Name: "ReadOnlySpan" or "Span" });
+            var withSpans = tied.Where(Spans).ToList();
+            if (withSpans.Count > 0 && withSpans.Count < tied.Count)
+            {
+                tied = withSpans;
+                first = tied[0];
+            }
+        }
+
         if (tied.Count > 1)
         {
             var specific = tied.FirstOrDefault(t => tied.All(o => o.Resolution == t.Resolution
@@ -2309,14 +2407,17 @@ public sealed partial class CSharpSymbolCollector
         {
             foreach (var candidate in chosen.Tied)
             {
-                RecordReference(candidate.Symbol.Id, offset, inMember, Confidence.NameOnly);
+                RecordReference(TargetId(candidate.Symbol), offset, inMember, Confidence.NameOnly);
             }
 
             return;
         }
 
-        RecordReference(chosen.Member.Symbol.Id, offset, inMember, receiverExact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+        RecordReference(TargetId(chosen.Member.Symbol), offset, inMember, receiverExact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
     }
+
+    /// <summary>The id a reference to <paramref name="symbol"/> is recorded with: <c>external:</c> and its id for a member of a reference.</summary>
+    private static string TargetId(CodeSymbol symbol) => symbol.IsExternal ? ReferenceTargets.External + symbol.Id : symbol.Id;
 
     private void RecordReference(string targetId, int offset, string? inMember, Confidence confidence)
     {

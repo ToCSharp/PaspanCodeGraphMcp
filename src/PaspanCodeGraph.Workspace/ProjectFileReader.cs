@@ -21,6 +21,21 @@ public sealed record ProjectModel(
     /// <summary>Namespaces imported in every file: the SDK's implicit usings and <c>&lt;Using&gt;</c> items.</summary>
     public IReadOnlyList<string> Usings { get; init; } = [];
 
+    /// <summary>The project SDK (<c>Microsoft.NET.Sdk.Web</c>); empty for a non-SDK project.</summary>
+    public string Sdk { get; init; } = "";
+
+    /// <summary><c>PackageReference</c> items with their versions (null when the version is centrally managed or missing).</summary>
+    public IReadOnlyList<(string Id, string? Version)> PackageReferences { get; init; } = [];
+
+    /// <summary><c>FrameworkReference</c> items (<c>Microsoft.AspNetCore.App</c>).</summary>
+    public IReadOnlyList<string> FrameworkReferences { get; init; } = [];
+
+    /// <summary>Assemblies of <c>Reference</c> items with a <c>HintPath</c>, as full paths.</summary>
+    public IReadOnlyList<string> AssemblyReferences { get; init; } = [];
+
+    /// <summary>The intermediate output directory, where NuGet restore writes <c>project.assets.json</c>.</summary>
+    public string IntermediateOutputPath { get; init; } = "";
+
     public string Directory => System.IO.Path.GetDirectoryName(Path)!;
 }
 
@@ -38,6 +53,9 @@ public sealed partial class ProjectFileReader
     private readonly List<string> _compile = [];
     private readonly HashSet<string> _compileSet = new(SymbolIndexBuilder.PathComparer);
     private readonly List<string> _references = [];
+    private readonly List<(string Id, string? Version)> _packages = [];
+    private readonly List<string> _frameworkReferences = [];
+    private readonly List<string> _assemblyReferences = [];
     private readonly List<string> _usings = [];
     private readonly List<string> _removedUsings = [];
     private string _sdk = "";
@@ -118,6 +136,11 @@ public sealed partial class ProjectFileReader
             _problems)
         {
             Usings = Usings(isSdk),
+            Sdk = _sdk,
+            PackageReferences = _packages,
+            FrameworkReferences = _frameworkReferences,
+            AssemblyReferences = _assemblyReferences,
+            IntermediateOutputPath = Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(Expand("$(BaseIntermediateOutputPath)") is { Length: > 0 } obj ? obj : "obj"))),
         };
     }
 
@@ -272,6 +295,41 @@ public sealed partial class ProjectFileReader
                 foreach (var ns in Split(remove))
                 {
                     _removedUsings.Add(ns);
+                }
+
+                break;
+
+            case "PackageReference":
+            {
+                var version = Expand((string?)item.Attribute("Version") ?? item.Elements().FirstOrDefault(e => e.Name.LocalName == "Version")?.Value ?? "").Trim();
+                foreach (var id in Split(include))
+                {
+                    _packages.RemoveAll(p => p.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+                    _packages.Add((id, version.Length == 0 ? null : version));
+                }
+
+                break;
+            }
+
+            case "FrameworkReference":
+                foreach (var name in Split(include))
+                {
+                    if (!_frameworkReferences.Contains(name, StringComparer.OrdinalIgnoreCase))
+                    {
+                        _frameworkReferences.Add(name);
+                    }
+                }
+
+                break;
+
+            case "Reference":
+                if (item.Elements().FirstOrDefault(e => e.Name.LocalName == "HintPath") is { } hint && Expand(hint.Value.Trim()) is { Length: > 0 } hintPath)
+                {
+                    var full = Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(hintPath)));
+                    if (!_assemblyReferences.Contains(full, SymbolIndexBuilder.PathComparer))
+                    {
+                        _assemblyReferences.Add(full);
+                    }
                 }
 
                 break;

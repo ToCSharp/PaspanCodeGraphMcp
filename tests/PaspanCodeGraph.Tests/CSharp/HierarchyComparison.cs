@@ -211,7 +211,8 @@ internal static class HierarchyComparison
     /// members): each name Roslyn binds to one, constructor calls at the type's name (or <c>new</c>, <c>base</c>,
     /// <c>this</c>) and indexers at <c>[</c>, compared with the exact and inferred references of the index.
     /// </summary>
-    public static MemberResult MemberReferences(SymbolIndex index, IEnumerable<CSharpCompilation> compilations)
+    /// <param name="external">Compare the references to members of types from referenced assemblies instead, by their documentation ids.</param>
+    public static MemberResult MemberReferences(SymbolIndex index, IEnumerable<CSharpCompilation> compilations, bool external = false)
     {
         // A member of the index by the location of its name: ids with types from references are not Roslyn's
         var byLocation = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -246,7 +247,7 @@ internal static class HierarchyComparison
                 void Add(ISymbol symbol, SyntaxToken token) => AddAt(symbol, token.GetLocation());
                 void AddAt(ISymbol symbol, Location location)
                 {
-                    if (Normalize(symbol) is { } member)
+                    if (Normalize(symbol, external) is { } member)
                     {
                         var position = location.GetLineSpan().StartLinePosition;
                         expected.Add($"{tree.FilePath}:{position.Line + 1}:{position.Character + 1} {IdOf(member)}");
@@ -297,11 +298,19 @@ internal static class HierarchyComparison
         var exact = new HashSet<string>(StringComparer.Ordinal);
         var nameOnly = new HashSet<string>(StringComparer.Ordinal);
         int exactCount = 0, inferredCount = 0, nameOnlyCount = 0;
-        foreach (var symbol in index.Symbols.Where(s => !s.Kind.IsType() && s.Kind != SymbolKind.Namespace))
+        var references = external
+            ? index.Symbols
+                .SelectMany(s => index.ReferencesFrom(s.Id))
+                .Where(r => r.TargetId.StartsWith(ReferenceTargets.External, StringComparison.Ordinal) && !r.TargetId.StartsWith(ReferenceTargets.External + "T:", StringComparison.Ordinal))
+                .Select(r => (Id: r.TargetId[ReferenceTargets.External.Length..], r.Reference))
+                .Distinct()
+            : index.Symbols
+                .Where(s => !s.Kind.IsType() && s.Kind != SymbolKind.Namespace)
+                .SelectMany(s => index.ReferencesTo(s.Id).Select(r => (s.Id, Reference: r)));
+        foreach (var (id, reference) in references)
         {
-            foreach (var reference in index.ReferencesTo(symbol.Id))
             {
-                var key = $"{reference.File}:{reference.Line}:{reference.Column} {symbol.Id}";
+                var key = $"{reference.File}:{reference.Line}:{reference.Column} {id}";
                 switch (reference.Confidence)
                 {
                     case Confidence.Exact:
@@ -336,11 +345,12 @@ internal static class HierarchyComparison
         SimpleNameSyntax simple => simple.Identifier,
         QualifiedNameSyntax qualified => qualified.Right.Identifier,
         AliasQualifiedNameSyntax alias => alias.Name.Identifier,
+        PredefinedTypeSyntax predefined => predefined.Keyword,
         _ => null,
     };
 
     /// <summary>A workspace member as the index records it: the definition, and an extension method's declaration.</summary>
-    private static ISymbol Normalize(ISymbol symbol)
+    private static ISymbol Normalize(ISymbol symbol, bool external)
     {
         var member = symbol switch
         {
@@ -350,6 +360,6 @@ internal static class HierarchyComparison
             IPropertySymbol or IFieldSymbol or IEventSymbol => symbol.OriginalDefinition,
             _ => null,
         };
-        return member != null && IsSource(member) && !member.IsImplicitlyDeclared ? member : null;
+        return member != null && (external ? !IsSource(member) && member.ContainingType is { IsTupleType: false, IsAnonymousType: false } : IsSource(member) && !member.IsImplicitlyDeclared) ? member : null;
     }
 }

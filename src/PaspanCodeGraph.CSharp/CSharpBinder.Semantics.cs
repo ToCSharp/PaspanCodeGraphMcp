@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using PaspanCodeGraph.Metadata;
 using PaspanParsers.CSharp;
 
 namespace PaspanCodeGraph.CSharp;
@@ -43,7 +44,7 @@ public sealed partial class CSharpBinder
 
     /// <summary>Whether a method is an extension method (its first parameter is <c>this</c>).</summary>
     public bool IsExtensionMethod(CodeSymbol method) =>
-        _memberSyntax.TryGetValue(method, out var syntax) && syntax.Parameters is { Count: > 0 } parameters && parameters[0].Modifiers.Contains(ParameterModifier.This);
+        ExternalMember(method) is { } external ? external.IsExtension : _memberSyntax.TryGetValue(method, out var syntax) && syntax.Parameters is { Count: > 0 } parameters && parameters[0].Modifiers.Contains(ParameterModifier.This);
 
     /// <summary>Remembers the type parameter constraints of one declaration of a type.</summary>
     public void RegisterTypeConstraints(CodeSymbol type, BindingContext context, IReadOnlyList<TypeParameterConstraint>? constraints)
@@ -63,7 +64,7 @@ public sealed partial class CSharpBinder
     {
         if (member.Kind == SymbolKind.EnumMember && member.ContainingType is { } enumType)
         {
-            return new NamedType(enumType, []);
+            return TypeOf(enumType, []);
         }
 
         if (member.Kind == SymbolKind.Constructor && member.ContainingType is { } created)
@@ -71,12 +72,16 @@ public sealed partial class CSharpBinder
             return SelfType(created);
         }
 
-        return _memberTypes.GetOrAdd(member, m => _memberSyntax.TryGetValue(m, out var syntax) ? ToSemType(syntax.Type, syntax.Context, m) : SemType.Unknown);
+        return _memberTypes.GetOrAdd(member, m => ExternalMember(m) is { } external ? ExternalMemberType(m, external)
+            : m.IsExternal && DefinitionOf(m) is { Kind: MetadataTypeKind.Delegate } && m.Members.FirstOrDefault(i => i.Name == "Invoke") is { } invoke ? MemberType(invoke)
+            : _memberSyntax.TryGetValue(m, out var syntax) ? ToSemType(syntax.Type, syntax.Context, m) : SemType.Unknown);
     }
 
     /// <summary>The parameters of a method, constructor, indexer, operator or delegate.</summary>
     public IReadOnlyList<ParameterSem> Parameters(CodeSymbol member) =>
-        _parameters.GetOrAdd(member, m => _memberSyntax.TryGetValue(m, out var syntax) && syntax.Parameters != null
+        _parameters.GetOrAdd(member, m => ExternalMember(m) is { } external ? ExternalParameters(m, external)
+            : m.IsExternal && DefinitionOf(m) is { Kind: MetadataTypeKind.Delegate } && m.Members.FirstOrDefault(i => i.Name == "Invoke") is { } invoke ? Parameters(invoke)
+            : _memberSyntax.TryGetValue(m, out var syntax) && syntax.Parameters != null
             ? syntax.Parameters.Select(p => new ParameterSem(
                 p.Name,
                 ToSemType(p.Type, syntax.Context, m),
@@ -85,7 +90,7 @@ public sealed partial class CSharpBinder
             : []);
 
     /// <summary>A type with its own type parameters as arguments, as <c>this</c> has it inside its declaration.</summary>
-    public NamedType SelfType(CodeSymbol type)
+    public SemType SelfType(CodeSymbol type)
     {
         var arguments = new List<SemType>();
         var chain = new List<CodeSymbol>();
@@ -102,12 +107,17 @@ public sealed partial class CSharpBinder
             }
         }
 
-        return new NamedType(type, arguments);
+        return TypeOf(type, arguments);
     }
 
     /// <summary>The base class and interfaces of a type, in terms of its own type parameters.</summary>
     public IReadOnlyList<SemType> BaseTypes(CodeSymbol type) => _baseTypes.GetOrAdd(type, t =>
     {
+        if (DefinitionOf(t) is { } definition)
+        {
+            return ExternalBaseTypes(t, definition);
+        }
+
         List<(BindingContext Context, TypeReference Type, string Written)> references;
         lock (_lock)
         {
@@ -155,6 +165,11 @@ public sealed partial class CSharpBinder
                         }
                     }
                 }
+            }
+
+            if (owner.IsExternal)
+            {
+                return ExternalConstraints(owner, parameter);
             }
 
             if (parameter.IsMethod)
@@ -266,7 +281,7 @@ public sealed partial class CSharpBinder
                 all.Add(i < arguments.Count ? arguments[i] : SemType.Unknown);
             }
 
-            return new NamedType(bound.Symbol, all);
+            return TypeOf(bound.Symbol, all);
         }
 
         var last = parts.Count == 0 ? "" : parts[^1];
@@ -353,14 +368,11 @@ public sealed partial class CSharpBinder
     {
         var found = new List<FoundMember>();
         var visited = new HashSet<CodeSymbol>();
-        var queue = new Queue<SemType>();
+        var queue = new Queue<(CodeSymbol Symbol, IReadOnlyList<SemType> Arguments)>();
         void Enqueue(SemType type)
         {
             switch (type.Underlying)
             {
-                case NamedType named:
-                    queue.Enqueue(named);
-                    break;
                 case TypeParameterType parameter:
                     foreach (var constraint in Constraints(parameter))
                     {
@@ -368,22 +380,35 @@ public sealed partial class CSharpBinder
                     }
 
                     break;
+                case ArrayType when FindExternal("System.Array") is { } array:
+                    queue.Enqueue((array, []));
+                    break;
+                case var other when SymbolOf(other) is { } named:
+                    queue.Enqueue(named);
+                    break;
             }
         }
 
-        Enqueue(receiver);
+        if (receiver is NullableType { Element: var element } && IsValueType(element.Underlying) && FindExternal("System.Nullable`1") is { } nullable)
+        {
+            // Members of Nullable<T> (HasValue, Value, GetValueOrDefault), not of T
+            queue.Enqueue((nullable, [element]));
+        }
+        else
+        {
+            Enqueue(receiver);
+        }
+
         var hidden = false;
         while (queue.Count > 0 && visited.Count < 64)
         {
-            var type = (NamedType)queue.Dequeue();
+            var type = queue.Dequeue();
             if (!visited.Add(type.Symbol))
             {
                 continue;
             }
 
-            Func<TypeParameterType, SemType?> map = p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < type.Arguments.Count && (p.Owner == null || IsInChain(p.Owner, type.Symbol))
-                ? type.Arguments[p.Ordinal]
-                : null;
+            var map = ArgumentMap(type.Symbol, type.Arguments);
             if (!hidden)
             {
                 foreach (var member in type.Symbol.Members)
@@ -393,7 +418,7 @@ public sealed partial class CSharpBinder
                         continue;
                     }
 
-                    if (found.Any(f => Overrides(f.Symbol, member)))
+                    if (found.Any(f => Overrides(f.Symbol, member)) || member.IsExternal && found.Any(f => SameSignatureOverride(f, member, map)))
                     {
                         continue;
                     }
@@ -413,20 +438,83 @@ public sealed partial class CSharpBinder
                 break;
             }
 
+            var hasBaseClass = false;
             foreach (var baseType in BaseTypes(type.Symbol))
             {
                 // A class or struct declares every member of the interfaces it implements, so these add nothing
                 var substituted = SemTypes.Substitute(baseType, map);
-                if (type.Symbol.Kind != SymbolKind.Interface && substituted is NamedType { Symbol.Kind: SymbolKind.Interface })
+                var baseSymbol = SymbolOf(substituted.Underlying);
+                if (type.Symbol.Kind != SymbolKind.Interface && baseSymbol is { Symbol.Kind: SymbolKind.Interface })
                 {
                     continue;
                 }
 
+                hasBaseClass |= baseSymbol is { Symbol.Kind: SymbolKind.Class or SymbolKind.Record } || substituted is ExternalType { Definition: null };
                 Enqueue(substituted);
+            }
+
+            // What every type of its kind derives from: System.Object, System.ValueType, System.Enum, System.MulticastDelegate
+            if (!hasBaseClass && ImplicitBase(type.Symbol) is { } implicitBase && implicitBase != type.Symbol)
+            {
+                queue.Enqueue((implicitBase, []));
             }
         }
 
         return found;
+    }
+
+    private CodeSymbol? FindExternal(string key) => Metadata.TypeCount != 0 && Metadata.FindType(key) is { } definition ? ExternalSymbol(definition) : null;
+
+    /// <summary>The class a type derives from when its declaration names none.</summary>
+    private CodeSymbol? ImplicitBase(CodeSymbol type)
+    {
+        if (type.IsExternal && type.Kind != SymbolKind.Interface)
+        {
+            return null;
+        }
+
+        return type.Kind switch
+        {
+            SymbolKind.Enum => FindExternal("System.Enum"),
+            SymbolKind.Struct or SymbolKind.RecordStruct => FindExternal("System.ValueType"),
+            SymbolKind.Delegate => FindExternal("System.MulticastDelegate"),
+            _ => FindExternal("System.Object"),
+        };
+    }
+
+    /// <summary>How the type parameters of a type (and its containing types) map to the type arguments of a constructed type.</summary>
+    private static Func<TypeParameterType, SemType?> ArgumentMap(CodeSymbol type, IReadOnlyList<SemType> arguments) =>
+        p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < arguments.Count && (p.Owner == null || IsInChain(p.Owner, type)) ? arguments[p.Ordinal] : null;
+
+    /// <summary>
+    /// Whether a member already found overrides the external virtual member <paramref name="member"/>: an override
+    /// with the same parameter types (overrides of external members are not linked).
+    /// </summary>
+    private bool SameSignatureOverride(FoundMember found, CodeSymbol member, Func<TypeParameterType, SemType?> map)
+    {
+        if (!found.Symbol.Modifiers.Contains("override") || found.Symbol.Kind != member.Kind || found.Symbol.TypeParameters.Count != member.TypeParameters.Count)
+        {
+            return false;
+        }
+
+        var ours = Parameters(found.Symbol);
+        var theirs = Parameters(member);
+        if (ours.Count != theirs.Count)
+        {
+            return false;
+        }
+
+        for (var i = 0; i < ours.Count; i++)
+        {
+            var a = found.Substitute(ours[i].Type);
+            var b = SemTypes.Substitute(theirs[i].Type, map);
+            if (!Equals(a, b) && !(a is TypeParameterType { IsMethod: true } x && b is TypeParameterType { IsMethod: true } y && x.Ordinal == y.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Whether <paramref name="derived"/> overrides <paramref name="member"/>, directly or through other overrides.</summary>
@@ -464,12 +552,23 @@ public sealed partial class CSharpBinder
         var queue = new Queue<SemType>([receiver.Underlying]);
         while (queue.Count > 0 && found.Count == 0 && visited.Count < 64)
         {
-            if (queue.Dequeue() is not NamedType type || !visited.Add(type.Symbol))
+            var current = queue.Dequeue();
+            if (current is TypeParameterType parameter)
+            {
+                foreach (var constraint in Constraints(parameter))
+                {
+                    queue.Enqueue(constraint.Underlying);
+                }
+
+                continue;
+            }
+
+            if (SymbolOf(current) is not { } type || !visited.Add(type.Symbol))
             {
                 continue;
             }
 
-            Func<TypeParameterType, SemType?> map = p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < type.Arguments.Count ? type.Arguments[p.Ordinal] : null;
+            var map = ArgumentMap(type.Symbol, type.Arguments);
             found.AddRange(type.Symbol.Members.Where(m => m.Kind == SymbolKind.Indexer && m.ExplicitInterface == null).Select(m => new FoundMember(m, map)));
             foreach (var baseType in BaseTypes(type.Symbol))
             {
@@ -480,11 +579,16 @@ public sealed partial class CSharpBinder
         return found;
     }
 
-    /// <summary>The constructors of a workspace type.</summary>
-    public List<FoundMember> Constructors(NamedType type)
+    /// <summary>The instance constructors of a workspace type or a type from a reference.</summary>
+    public List<FoundMember> Constructors(SemType type)
     {
-        Func<TypeParameterType, SemType?> map = p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < type.Arguments.Count ? type.Arguments[p.Ordinal] : null;
-        return type.Symbol.Members.Where(m => m.Kind == SymbolKind.Constructor && !m.Modifiers.Contains("static")).Select(m => new FoundMember(m, map)).ToList();
+        if (SymbolOf(type.Underlying) is not { } named)
+        {
+            return [];
+        }
+
+        var map = ArgumentMap(named.Symbol, named.Arguments);
+        return named.Symbol.Members.Where(m => m.Kind == SymbolKind.Constructor && !m.Modifiers.Contains("static")).Select(m => new FoundMember(m, map)).ToList();
     }
 
     /// <summary>All the types a type converts to by an implicit reference conversion: itself, its base types and interfaces.</summary>
@@ -497,19 +601,19 @@ public sealed partial class CSharpBinder
         {
             var current = queue.Dequeue();
             yield return current;
-            if (current is NamedType named && visited.Add(named.Symbol))
-            {
-                Func<TypeParameterType, SemType?> map = p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < named.Arguments.Count ? named.Arguments[p.Ordinal] : null;
-                foreach (var baseType in BaseTypes(named.Symbol))
-                {
-                    queue.Enqueue(SemTypes.Substitute(baseType, map).Underlying);
-                }
-            }
-            else if (current is TypeParameterType parameter)
+            if (current is TypeParameterType parameter)
             {
                 foreach (var constraint in Constraints(parameter))
                 {
                     queue.Enqueue(constraint.Underlying);
+                }
+            }
+            else if (SymbolOf(current) is { } named && visited.Add(named.Symbol))
+            {
+                var map = ArgumentMap(named.Symbol, named.Arguments);
+                foreach (var baseType in BaseTypes(named.Symbol))
+                {
+                    queue.Enqueue(SemTypes.Substitute(baseType, map).Underlying);
                 }
             }
         }
@@ -518,13 +622,10 @@ public sealed partial class CSharpBinder
     /// <summary>The workspace extension methods named <paramref name="name"/> whose static class's namespace is in scope.</summary>
     public IEnumerable<CodeSymbol> ExtensionMethods(string name, BindingContext context)
     {
-        if (!_extensionMethods.TryGetValue(name, out var methods))
-        {
-            return [];
-        }
-
         var namespaces = NamespacesInScope(context.Imports);
-        return methods.Where(m => namespaces.Contains(m.ContainingType?.Namespace ?? ""));
+        var workspace = _extensionMethods.TryGetValue(name, out var methods) ? methods.Where(m => namespaces.Contains(m.ContainingType?.Namespace ?? "")) : [];
+        var external = Metadata.TypeCount == 0 ? [] : ExternalExtensionMethods(name).Where(m => namespaces.Contains(m.ContainingType?.Namespace ?? ""));
+        return workspace.Concat(external);
     }
 
     private HashSet<string> NamespacesInScope(ImportScope imports) => _namespacesInScope.GetOrAdd(imports, scope =>
@@ -653,6 +754,7 @@ public sealed partial class CSharpBinder
                 NamedType { Symbol.Kind: SymbolKind.Delegate } => 1,
                 NamedType => -1,
                 ExternalType external when IsDelegateName(external.Name) => 1,
+                ExternalType external when DefinitionOf(external) is { } definition => definition.Kind == MetadataTypeKind.Delegate ? 1 : -1,
                 _ when SemTypes.IsPredefined(to) => -1,
                 _ => 0,
             };
@@ -666,6 +768,8 @@ public sealed partial class CSharpBinder
                 return wider.Contains(b.Name) ? 1 : SemTypes.IsPredefined(b) ? -1 : 0;
             case (ExternalType a, ExternalType b) when SemTypes.IsPredefined(a) && SemTypes.IsPredefined(b):
                 return -1;
+            case (ExternalType a, ExternalType b) when DefinitionOf(a) is { } definitionA && DefinitionOf(b) is { } definitionB:
+                return ExternalConversion(a, b, definitionA, definitionB);
             case (ExternalType a, NamedType b):
                 // Only a user-defined conversion of the workspace type
                 return HasConversion(b.Symbol) ? 0 : a.Name == "Object" ? 0 : -1;
@@ -691,12 +795,18 @@ public sealed partial class CSharpBinder
                 {
                     if (ancestor is ExternalType external)
                     {
-                        sawExternal = true;
+                        // A type from a reference whose own bases are not known could implement it
+                        sawExternal |= DefinitionOf(external) == null;
                         if (external.Name == b.Name && external.Arguments.Count == b.Arguments.Count)
                         {
                             return 1;
                         }
                     }
+                }
+
+                if (DefinitionOf(b) is { } target && HasExternalConversion(target))
+                {
+                    return 0;
                 }
 
                 // A type from a reference could implement it; records and structs implement some interfaces
@@ -718,6 +828,18 @@ public sealed partial class CSharpBinder
 
             case (ArrayType a, ArrayType b):
                 return a.Rank != b.Rank ? -1 : Math.Min(1, Conversion(a.Element, b.Element));
+            case (ArrayType a, ExternalType b) when DefinitionOf(b) is { } arrayTarget:
+                return arrayTarget.Namespace switch
+                {
+                    "System" when b.Name is "Array" or "ICloneable" => 1,
+                    "System.Collections" when b.Name is "IEnumerable" or "ICollection" or "IList" or "IStructuralComparable" or "IStructuralEquatable" => 1,
+                    "System.Collections.Generic" when b.Arguments.Count == 1 && b.Name is "IEnumerable" or "ICollection" or "IList" or "IReadOnlyCollection" or "IReadOnlyList"
+                        => a.Rank == 1 ? Math.Min(1, Conversion(a.Element, b.Arguments[0])) : -1,
+                    // T[] to Span<T>, ReadOnlySpan<T>, Memory<T>...: a conversion operator of the target taking an array
+                    _ => arrayTarget.Members.Any(m => m.Kind == MetadataMemberKind.Operator && m.Name == "op_Implicit" && m.Parameters is [{ Type: MetaArray }])
+                        ? (b.Arguments.Count == 1 ? Math.Min(1, Conversion(a.Element, b.Arguments[0])) : 0)
+                        : -1,
+                };
             case (ArrayType a, ExternalType b):
                 return b.Name is "Array" or "ICloneable" ? 1
                     : b.Arguments.Count == 1 && SemTypes.ElementOf(b) != null ? Math.Min(1, Conversion(a.Element, b.Arguments[0]))
@@ -755,15 +877,53 @@ public sealed partial class CSharpBinder
         }
     }
 
+    /// <summary>A conversion between two types from references: to a base type or interface, or a user-defined one.</summary>
+    private int ExternalConversion(ExternalType from, ExternalType to, MetadataType fromDefinition, MetadataType toDefinition)
+    {
+        if (fromDefinition == toDefinition)
+        {
+            return ArgumentsConvert(from.Arguments, to.Arguments, to.Name) ? 1 : -1;
+        }
+
+        foreach (var ancestor in Ancestors(from))
+        {
+            if (ancestor is ExternalType external && DefinitionOf(external) == toDefinition)
+            {
+                return ArgumentsConvert(external.Arguments, to.Arguments, to.Name) ? 1 : -1;
+            }
+
+            if (ancestor is ExternalType { Definition: null } unknown && DefinitionOf(unknown) == null)
+            {
+                return 0;
+            }
+        }
+
+        if (UserDefinedConversion(fromDefinition, toDefinition))
+        {
+            return 1;
+        }
+
+        // Enums convert to their base types only; a type parameter's constraints are not known
+        return -1;
+    }
+
+    /// <summary>
+    /// Whether the type arguments of a generic type allow converting to <paramref name="to"/>: identical, or, for a
+    /// variant interface or delegate, converting (not failing to convert) one by one.
+    /// </summary>
+    private bool ArgumentsConvert(IReadOnlyList<SemType> from, IReadOnlyList<SemType> to, string name) =>
+        IsVariant(name) ? from.Zip(to).All(p => Conversion(p.First, p.Second) >= 0) : from.Zip(to).All(p => Conversion(p.First, p.Second) >= 0 && (Conversion(p.Second, p.First) >= 0 || p.First.IsUnknown));
+
     private static bool IsVariant(string name) => name is "IEnumerable" or "IReadOnlyList" or "IReadOnlyCollection" or "Func" or "Action" or "IEnumerator" or "IQueryable" or "Predicate" or "IComparer" or "IEqualityComparer" or "IComparable";
 
     private static bool IsDelegateName(string name) => name is "Func" or "Action" or "Predicate" or "Comparison" or "Converter" or "EventHandler" or "Expression" or "Delegate" or "MulticastDelegate" or "AsyncCallback";
 
     private static bool HasConversion(CodeSymbol type) => type.Members.Any(m => m.Kind == SymbolKind.Operator && m.Id.Contains(".op_Implicit(", StringComparison.Ordinal));
 
-    private static bool IsValueType(SemType type) => type switch
+    private bool IsValueType(SemType type) => type switch
     {
         NamedType named => named.Symbol.Kind is SymbolKind.Struct or SymbolKind.RecordStruct or SymbolKind.Enum,
+        ExternalType external when DefinitionOf(external) is { } definition => definition.Kind is MetadataTypeKind.Struct or MetadataTypeKind.Enum,
         ExternalType external => ValueTypeNames.Contains(external.Name),
         TupleType => true,
         _ => false,
@@ -796,6 +956,13 @@ public sealed partial class CSharpBinder
                 return ([SemTypes.Object, new ExternalType("EventArgs", "System.EventArgs", [])], SemType.Void);
             case ExternalType { Name: "Expression", Arguments.Count: 1 } expression:
                 return DelegateSignature(expression.Arguments[0]);
+            case ExternalType external when DefinitionOf(external) is { Kind: MetadataTypeKind.Delegate } definition:
+            {
+                var symbol = ExternalSymbol(definition);
+                var map = ArgumentMap(symbol, external.Arguments);
+                return (Parameters(symbol).Select(p => SemTypes.Substitute(p.Type, map)).ToList(), SemTypes.Substitute(MemberType(symbol), map));
+            }
+
             default:
                 return null;
         }

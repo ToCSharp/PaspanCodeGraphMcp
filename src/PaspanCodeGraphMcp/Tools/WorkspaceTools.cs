@@ -18,7 +18,8 @@ public sealed record ProjectReport(
     string LanguageVersion,
     int Documents,
     IReadOnlyList<string> ProjectReferences,
-    IReadOnlyList<string> PreprocessorSymbols);
+    IReadOnlyList<string> PreprocessorSymbols,
+    int ReferencedAssemblies);
 
 public sealed record LoadReport(
     string WorkspacePath,
@@ -28,6 +29,8 @@ public sealed record LoadReport(
     int Documents,
     int Symbols,
     int FilesWithParseErrors,
+    int ReferencedAssemblies,
+    int ExternalTypes,
     IReadOnlyList<ProjectReport> Projects,
     IReadOnlyList<ProblemDto> Problems);
 
@@ -39,6 +42,8 @@ public sealed record WorkspaceStatus(
     int Projects,
     int Documents,
     int Symbols,
+    int ReferencedAssemblies,
+    int ExternalTypes,
     DateTimeOffset? LoadedAt,
     double? LoadSeconds,
     long WorkingSetMb,
@@ -60,7 +65,7 @@ public sealed record DiagnosticsResult(int Total, IReadOnlyDictionary<string, in
 public sealed class WorkspaceTools
 {
     [McpServerTool(Name = "workspace_load", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Load workspace")]
-    [Description("Load a .sln/.slnx/.csproj (replaces the current workspace). Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile items with wildcards, ProjectReference. Every file is parsed by PaspanParsers with error recovery. Returns per-project file counts, preprocessor symbols and the problems found.")]
+    [Description("Load a .sln/.slnx/.csproj (replaces the current workspace). Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile items with wildcards, ProjectReference, PackageReference and FrameworkReference. The referenced assemblies (the SDK's reference packs, the packages of obj/project.assets.json or, without a restore, of the NuGet cache) are read with System.Reflection.Metadata so that their types and members bind. Every file is parsed by PaspanParsers with error recovery. Returns per-project file and assembly counts, preprocessor symbols and the problems found.")]
     public static async Task<LoadReport> Load(
         WorkspaceHost host,
         [Description("Path to a .sln, .slnx, .csproj or a directory containing one. Defaults to the --workspace the server was started with.")] string? path = null,
@@ -84,6 +89,8 @@ public sealed class WorkspaceTools
             snapshot.Documents.Count,
             snapshot.Index.Count,
             snapshot.Documents.Values.Count(d => d.Unit is null || d.Errors.Count != 0),
+            snapshot.Metadata.Assemblies.Count,
+            snapshot.Metadata.TypeCount,
             snapshot.Projects.Select(p => new ProjectReport(
                 p.Name,
                 p.Path,
@@ -91,12 +98,13 @@ public sealed class WorkspaceTools
                 p.LanguageVersion.ToString(),
                 documentsByProject.GetValueOrDefault(p.Name),
                 p.ProjectReferences.Select(r => Path.GetFileNameWithoutExtension(r)).ToList(),
-                p.PreprocessorSymbols)).ToList(),
+                p.PreprocessorSymbols,
+                snapshot.References.GetValueOrDefault(p.Path)?.Count ?? 0)).ToList(),
             snapshot.Problems.Select(ProblemDto.From).ToList());
     }
 
     [McpServerTool(Name = "workspace_status", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Workspace status")]
-    [Description("Current workspace: loaded projects, file and symbol counts, load time, process memory, number of load problems.")]
+    [Description("Current workspace: loaded projects, file, symbol, referenced assembly and external type counts, load time, process memory, number of load problems.")]
     public static WorkspaceStatus Status(WorkspaceHost host)
     {
         var snapshot = host.Current;
@@ -108,6 +116,8 @@ public sealed class WorkspaceTools
             Projects: snapshot?.Projects.Count ?? 0,
             Documents: snapshot?.Documents.Count ?? 0,
             Symbols: snapshot?.Index.Count ?? 0,
+            ReferencedAssemblies: snapshot?.Metadata.Assemblies.Count ?? 0,
+            ExternalTypes: snapshot?.Metadata.TypeCount ?? 0,
             LoadedAt: snapshot?.LoadedAt,
             LoadSeconds: snapshot is null ? null : Math.Round(snapshot.Elapsed.TotalSeconds, 2),
             WorkingSetMb: Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),

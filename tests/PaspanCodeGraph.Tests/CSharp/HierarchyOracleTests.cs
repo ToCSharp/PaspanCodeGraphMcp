@@ -49,4 +49,14 @@ public sealed class HierarchyOracleTests
         Assert.IsTrue(result.Result.Compared > 10000, report);
         Assert.IsTrue(result.Precision >= 0.95 && result.Recall >= 0.85, report);
     }
+
+    [TestMethod]
+    public void ExternalMemberReferences_MatchRoslyn()
+    {
+        var result = HierarchyComparison.MemberReferences(Index, RoslynOracle.Compilations, external: true);
+        var report = result.Report();
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "external-references-report.txt"), report.Split(" differ:")[0] + "\n" + string.Join("\n", result.Result.Differences));
+        Assert.IsTrue(result.Result.Compared > 5000, report);
+        Assert.IsTrue(result.Precision >= 0.95 && result.Recall >= 0.9, report);
+    }
 }

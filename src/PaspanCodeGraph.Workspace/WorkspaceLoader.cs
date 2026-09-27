@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Paspan;
 using PaspanCodeGraph.CSharp;
+using PaspanCodeGraph.Metadata;
 using PaspanParsers.CSharp;
 
 namespace PaspanCodeGraph.Workspace;
@@ -30,6 +31,12 @@ public sealed class WorkspaceSnapshot
 
     /// <summary>Problems of discovery and of reading projects; parse errors are in <see cref="SourceDocument.Errors"/>.</summary>
     public required IReadOnlyList<LoadProblem> Problems { get; init; }
+
+    /// <summary>The types of the assemblies the projects reference (framework, packages); empty when loaded without them.</summary>
+    public MetadataCatalog Metadata { get; init; } = MetadataCatalog.Empty;
+
+    /// <summary>The assemblies each project references, by project path.</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> References { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
 
     public required DateTimeOffset LoadedAt { get; init; }
 
@@ -63,7 +70,8 @@ public sealed class WorkspaceSnapshot
 /// <summary>Loads a workspace: finds its projects, reads them, parses their sources in parallel and indexes the declarations.</summary>
 public static class WorkspaceLoader
 {
-    public static WorkspaceSnapshot Load(string path, string configuration = "Debug", string platform = "AnyCPU", CancellationToken cancellationToken = default)
+    /// <param name="readReferences">Read the assemblies the projects reference, so that their types and members bind.</param>
+    public static WorkspaceSnapshot Load(string path, string configuration = "Debug", string platform = "AnyCPU", CancellationToken cancellationToken = default, bool readReferences = true)
     {
         var stopwatch = Stopwatch.StartNew();
         var discovery = SolutionDiscovery.Discover(path);
@@ -128,8 +136,26 @@ public static class WorkspaceLoader
             new ParallelOptions { CancellationToken = cancellationToken },
             file => documents[file.Key] = ParseFile(file.Key, file.Value.Name, options[file.Value]));
 
+        // The referenced assemblies of all projects, read into one catalog while the sources are parsed
+        var metadata = MetadataCatalog.Empty;
+        var referencesByProject = new Dictionary<string, IReadOnlyList<string>>(SymbolIndexBuilder.PathComparer);
+        if (readReferences)
+        {
+            var paths = new List<string>();
+            foreach (var project in projects)
+            {
+                var resolved = ReferenceAssemblies.Resolve(project, problems);
+                referencesByProject[project.Path] = resolved;
+                paths.AddRange(resolved);
+            }
+
+            var unreadable = new List<string>();
+            metadata = MetadataCatalog.Load(paths, unreadable);
+            problems.AddRange(unreadable.Select(u => LoadProblem.Warning(u)));
+        }
+
         var builder = new SymbolIndexBuilder();
-        var binder = new CSharpBinder(builder);
+        var binder = new CSharpBinder(builder) { Metadata = metadata };
         foreach (var project in projects)
         {
             var scope = binder.ProjectScope(project.Name);
@@ -180,6 +206,8 @@ public static class WorkspaceLoader
             Documents = new Dictionary<string, SourceDocument>(documents, SymbolIndexBuilder.PathComparer),
             Index = builder.Build(),
             Problems = problems,
+            Metadata = metadata,
+            References = referencesByProject,
             LoadedAt = DateTimeOffset.UtcNow,
             Elapsed = stopwatch.Elapsed,
         };

@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Reads the types and members of referenced assemblies (reference packs, NuGet packages) with System.Reflection.Metadata.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />
+  </ItemGroup>
+</Project>

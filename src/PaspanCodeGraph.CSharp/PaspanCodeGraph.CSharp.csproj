@@ -4,6 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\PaspanCodeGraph.Core\PaspanCodeGraph.Core.csproj" />
+    <ProjectReference Include="..\PaspanCodeGraph.Metadata\PaspanCodeGraph.Metadata.csproj" />
     <ProjectReference Include="..\..\external\PaspanParsers\src\PaspanParsers\PaspanParsers.csproj" />
   </ItemGroup>
 </Project>
