@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>C# front end of the code graph: turns PaspanParsers syntax trees into symbols.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaspanCodeGraph.Core\PaspanCodeGraph.Core.csproj" />
+    <ProjectReference Include="..\..\external\PaspanParsers\src\PaspanParsers\PaspanParsers.csproj" />
+  </ItemGroup>
+</Project>

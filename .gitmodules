@@ -1,0 +1,3 @@
+[submodule "external/PaspanParsers"]
+	path = external/PaspanParsers
+	url = https://github.com/ToCSharp/PaspanParsers.git

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Finds and loads .sln/.slnx/.csproj workspaces without MSBuild and parses their sources.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaspanCodeGraph.CSharp\PaspanCodeGraph.CSharp.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />
+  </ItemGroup>
+</Project>
