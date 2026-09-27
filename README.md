@@ -6,10 +6,11 @@ solutions without MSBuild. It is read-only and talks MCP over stdio.
 
 ## Status
 
-Stages 1 to 4 of the plan: loading a workspace, navigating its declarations, binding type names, the type
+Stages 1 to 5 of the plan: loading a workspace, navigating its declarations, binding type names, the type
 hierarchy (base types, overrides, interface implementations), references to types and members, the call
 graph (callers and callees) from the types of expressions, and the types and members of referenced assemblies
-(the framework and NuGet packages) read with System.Reflection.Metadata.
+(the framework and NuGet packages) read with System.Reflection.Metadata. The server watches the workspace and
+updates the graph when files change, and keeps the graph on disk so that a restart does not parse everything again.
 
 ## Running
 
@@ -37,6 +38,9 @@ MCP client configuration:
 | `--workspace`, `-w` or the first argument: a .sln, .slnx, .csproj or a directory holding one | `PASPAN_WORKSPACE` | none: call `workspace_load` |
 | `--configuration`, `-c` | `PASPAN_CONFIGURATION` | `Debug` |
 | `--platform`, `-p` | `PASPAN_PLATFORM` | `AnyCPU` |
+| `--no-watch`: do not watch the files | `PASPAN_WATCH=0` | watch |
+| `--no-cache`: do not keep the graph on disk | `PASPAN_CACHE=0` | keep it |
+| `--cache <file>`: where to keep the graph | `PASPAN_CACHE_PATH` | `.paspan/graph.bin` next to the solution |
 | | `PASPAN_LOG_LEVEL` | `Information` (logs go to stderr) |
 
 ## Tools
@@ -44,7 +48,7 @@ MCP client configuration:
 | Tool | What it returns |
 | --- | --- |
 | `workspace_load` | Loads a solution or project; per-project file and referenced assembly counts, preprocessor symbols and load problems |
-| `workspace_status` | What is loaded, counts (with referenced assemblies and their types), load time, memory |
+| `workspace_status` | What is loaded, counts (with referenced assemblies and their types), load time, how the last change was applied (files parsed and bound again), whether files are watched, how the graph cache was used, memory |
 | `diagnostics` | Projects that could not be read and syntax errors, with positions; how member references were bound (exact, inferred, name-only share, external, unresolved) |
 | `find_symbol` | Declarations by (dotted) name: substring, exact or `*`/`?` wildcards |
 | `symbol_info` | Signature, documentation summary, accessibility, modifiers, parameters, all declarations, and relations: base class, interfaces, overridden and implemented members, counts of derived types, implementations and references |
@@ -102,6 +106,24 @@ For member references, exact and inferred ones reach a recall of 98.3% and a pre
 share of name-only member references of this repository from 19% to 4.5%, and the calls that could not be bound
 at all from 444 to 4; loading it takes about 1.3 s instead of 0.6 s. The ids of every public type and member of
 `System.Runtime`, `System.Collections`, `System.Linq` and `System.Collections.Immutable` match Roslyn's.
+
+## Updates and the graph cache
+
+A change to a file (saved, created, deleted or renamed, in the solution's or a project's directory) updates the
+graph once changes stop for 300 ms; a tool called earlier runs the update first, so answers match the files on
+disk. An update reads the solution and project files again, parses only the files whose content changed, and finds
+the references again only in the changed files and in the files that mention the name of a declaration that
+changed (added, removed, or with another signature, type or modifiers). A change that can affect binding without
+the name being written (a type's base list, an operator, an indexer, members used by `foreach`, `await`, `using`,
+deconstruction or queries, a `global using`, a project option, the referenced assemblies) finds the references of
+every file again. `IncrementalUpdateTests` and a random edit run (200 renames, removals and modifier changes on this
+repository) check that an update gives the same graph as a full load. On this repository a full load takes about
+1.5 s and an update after editing a method body about 0.3 s.
+
+The graph (symbols, references, and for each file its content hash, declarations and the names it mentions) is
+written to `.paspan/graph.bin` next to the solution after a load and after each update. The next load reads it in
+about 0.2 s instead of loading in full, then compares the files, projects and referenced assemblies with the disk
+and updates what changed. A cache written by another build of the server or for another configuration is ignored.
 
 ## How projects are read
 

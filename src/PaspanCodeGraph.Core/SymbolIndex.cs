@@ -202,6 +202,9 @@ public sealed class SymbolIndex
         return null;
     }
 
+    /// <summary>The ids that references were recorded to: workspace symbols and <see cref="ReferenceTargets"/> ids.</summary>
+    public IEnumerable<string> ReferenceTargetIds => _references.Keys;
+
     /// <summary>The number of references recorded.</summary>
     public int ReferenceCount => _references.Values.Sum(l => l.Count);
 

@@ -31,6 +31,7 @@ public sealed record LoadReport(
     int FilesWithParseErrors,
     int ReferencedAssemblies,
     int ExternalTypes,
+    string? Cache,
     IReadOnlyList<ProjectReport> Projects,
     IReadOnlyList<ProblemDto> Problems);
 
@@ -46,10 +47,17 @@ public sealed record WorkspaceStatus(
     int ExternalTypes,
     DateTimeOffset? LoadedAt,
     double? LoadSeconds,
+    UpdateReport? LastChange,
+    bool Watching,
+    string? Cache,
     long WorkingSetMb,
     IReadOnlyList<string> ProjectNames,
     int ProblemCount,
     string? LastError);
+
+/// <summary>How the current snapshot was made from the one before.</summary>
+/// <param name="Kind">Full, Incremental (changed files parsed, affected files bound), Unchanged, or Cache (read from the graph cache).</param>
+public sealed record UpdateReport(string Kind, int ParsedFiles, int BoundFiles, double Seconds);
 
 public sealed record DiagnosticDto(string Severity, string Kind, string Message, string? File, int Line, int Column, string? Project);
 
@@ -65,7 +73,7 @@ public sealed record DiagnosticsResult(int Total, IReadOnlyDictionary<string, in
 public sealed class WorkspaceTools
 {
     [McpServerTool(Name = "workspace_load", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Load workspace")]
-    [Description("Load a .sln/.slnx/.csproj (replaces the current workspace). Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile items with wildcards, ProjectReference, PackageReference and FrameworkReference. The referenced assemblies (the SDK's reference packs, the packages of obj/project.assets.json or, without a restore, of the NuGet cache) are read with System.Reflection.Metadata so that their types and members bind. Every file is parsed by PaspanParsers with error recovery. Returns per-project file and assembly counts, preprocessor symbols and the problems found.")]
+    [Description("Load a .sln/.slnx/.csproj (replaces the current workspace). Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile items with wildcards, ProjectReference, PackageReference and FrameworkReference. The referenced assemblies (the SDK's reference packs, the packages of obj/project.assets.json or, without a restore, of the NuGet cache) are read with System.Reflection.Metadata so that their types and members bind. Every file is parsed by PaspanParsers with error recovery. The graph is kept in .paspan/graph.bin next to the solution, so a later load reads it and parses and binds again only what changed (unless the server runs with --no-cache). Returns per-project file and assembly counts, preprocessor symbols and the problems found.")]
     public static async Task<LoadReport> Load(
         WorkspaceHost host,
         [Description("Path to a .sln, .slnx, .csproj or a directory containing one. Defaults to the --workspace the server was started with.")] string? path = null,
@@ -75,10 +83,10 @@ public sealed class WorkspaceTools
         var target = path ?? host.Options.WorkspacePath
             ?? throw new ArgumentException("No path given and the server was started without --workspace.");
         var snapshot = await host.LoadAsync(target, configuration ?? host.Options.Configuration, host.Options.Platform, ct);
-        return Report(snapshot);
+        return Report(snapshot, host.CacheStatus);
     }
 
-    internal static LoadReport Report(WorkspaceSnapshot snapshot)
+    internal static LoadReport Report(WorkspaceSnapshot snapshot, string? cache = null)
     {
         var documentsByProject = snapshot.Documents.Values.GroupBy(d => d.Project).ToDictionary(g => g.Key, g => g.Count());
         return new LoadReport(
@@ -88,9 +96,10 @@ public sealed class WorkspaceTools
             Math.Round(snapshot.Elapsed.TotalSeconds, 2),
             snapshot.Documents.Count,
             snapshot.Index.Count,
-            snapshot.Documents.Values.Count(d => d.Unit is null || d.Errors.Count != 0),
+            snapshot.Documents.Values.Count(d => d.Failure is not null || d.Errors.Count != 0),
             snapshot.Metadata.Assemblies.Count,
             snapshot.Metadata.TypeCount,
+            cache,
             snapshot.Projects.Select(p => new ProjectReport(
                 p.Name,
                 p.Path,
@@ -104,7 +113,7 @@ public sealed class WorkspaceTools
     }
 
     [McpServerTool(Name = "workspace_status", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Workspace status")]
-    [Description("Current workspace: loaded projects, file, symbol, referenced assembly and external type counts, load time, process memory, number of load problems.")]
+    [Description("Current workspace: loaded projects, file, symbol, referenced assembly and external type counts, load time, how the last change was applied (the server watches the files and updates the graph when they change: changed files are parsed again and the files that can bind to what changed are bound again), whether it is watching, how the graph cache was used, process memory, number of load problems.")]
     public static WorkspaceStatus Status(WorkspaceHost host)
     {
         var snapshot = host.Current;
@@ -120,6 +129,9 @@ public sealed class WorkspaceTools
             ExternalTypes: snapshot?.Metadata.TypeCount ?? 0,
             LoadedAt: snapshot?.LoadedAt,
             LoadSeconds: snapshot is null ? null : Math.Round(snapshot.Elapsed.TotalSeconds, 2),
+            LastChange: snapshot is null ? null : new UpdateReport(snapshot.Kind.ToString(), snapshot.ParsedFiles, snapshot.BoundFiles, Math.Round(snapshot.Elapsed.TotalSeconds, 2)),
+            Watching: host.WatchedDirectories.Count > 0,
+            Cache: host.CacheStatus,
             WorkingSetMb: Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024),
             ProjectNames: snapshot?.Projects.Select(p => p.Name).Order(StringComparer.OrdinalIgnoreCase).ToList() ?? [],
             ProblemCount: snapshot?.Problems.Count ?? 0,
