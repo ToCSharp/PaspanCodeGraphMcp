@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>The code graph of a symbol index: edges, centrality, communities, paths, and lexical search (BM25) for retrieval by AI agents.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaspanCodeGraph.Core\PaspanCodeGraph.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />
+  </ItemGroup>
+</Project>

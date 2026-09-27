@@ -17,6 +17,7 @@ public sealed class WorkspaceHost(ServerOptions options, ILogger<WorkspaceHost> 
     private volatile Task<WorkspaceSnapshot>? _pendingLoad;
     private SourceWatcher? _watcher;
     private volatile bool _changesPending;
+    private AnnotationStore? _annotations;
 
     public WorkspaceSnapshot? Current => _snapshot;
 
@@ -32,6 +33,23 @@ public sealed class WorkspaceHost(ServerOptions options, ILogger<WorkspaceHost> 
     public IReadOnlyList<string> WatchedDirectories => _watcher?.Directories ?? [];
 
     public ServerOptions Options => options;
+
+    /// <summary>The notes kept for the current workspace, in <c>annotations.json</c> beside the graph cache.</summary>
+    public AnnotationStore Annotations
+    {
+        get
+        {
+            var root = _snapshot?.RootPath ?? throw new InvalidOperationException("No workspace loaded.");
+            var file = Path.Combine(Path.GetDirectoryName(CacheFile(root))!, "annotations.json");
+            var store = _annotations;
+            if (store == null || store.File != file)
+            {
+                _annotations = store = AnnotationStore.Open(file);
+            }
+
+            return store;
+        }
+    }
 
     /// <summary>
     /// Waits for a load or update in progress, runs the update for changes seen on disk, then returns the snapshot

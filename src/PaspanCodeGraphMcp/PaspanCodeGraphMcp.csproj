@@ -15,6 +15,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PaspanCodeGraph.Workspace\PaspanCodeGraph.Workspace.csproj" />
+    <ProjectReference Include="..\PaspanCodeGraph.Search\PaspanCodeGraph.Search.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />

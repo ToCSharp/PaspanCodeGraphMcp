@@ -6,11 +6,13 @@ solutions without MSBuild. It is read-only and talks MCP over stdio.
 
 ## Status
 
-Stages 1 to 5 of the plan: loading a workspace, navigating its declarations, binding type names, the type
+Stages 1 to 6 of the plan: loading a workspace, navigating its declarations, binding type names, the type
 hierarchy (base types, overrides, interface implementations), references to types and members, the call
 graph (callers and callees) from the types of expressions, and the types and members of referenced assemblies
 (the framework and NuGet packages) read with System.Reflection.Metadata. The server watches the workspace and
 updates the graph when files change, and keeps the graph on disk so that a restart does not parse everything again.
+On top of the graph, retrieval tools for agents (GraphRAG without an LLM in the server): search by words, context
+within a token budget, impact of a change, paths between symbols, a map of modules, and notes kept by the agent.
 
 ## Running
 
@@ -60,6 +62,12 @@ MCP client configuration:
 | `find_references` | References to a type or member, grouped by file, with the line, the containing declaration and a confidence; for a virtual or interface member also those of its overrides, implementations and bases; a type or member of a referenced assembly by its id (`M:System.String.Split(System.Char[])`) |
 | `find_callers` | Call sites of a method, constructor, property, indexer or event with the calling member; calls through a base or interface member it overrides or implements are marked indirect; members of referenced assemblies by their id |
 | `find_callees` | What a member (or all members of a type) calls: workspace members with call counts, virtual and interface targets with their implementation counts, members of referenced assemblies by their ids, unbound calls by name |
+| `search_code` | Types and members by what they are about ("where are project files read"): BM25 over names split at case changes, documentation, signatures, file names and member bodies, boosted by centrality |
+| `get_context` | For a symbol or a query: its source (a type's header and member signatures), then the symbols around it in the graph (containing type, bases, overridden members, callers, callees, implementations, used types), nearest and most relevant first, with code while a token budget allows |
+| `impact_analysis` | What may break if a symbol changes: users and their users up to a depth, derived types, overrides and implementations, grouped by depth and project, with the affected tests |
+| `find_path` | The shortest chain of calls and uses from one symbol to another, through overrides and implementations, with the place of each call |
+| `module_map` | Projects with references and namespaces, communities of types (Louvain over the reference graph) with their links, and entry points |
+| `annotate` | Keeps a note on a symbol, namespace or project (in `.paspan/annotations.json`); search, context and module map answers carry it |
 
 Symbols are named by documentation-comment ids (``T:Ns.Type`1``, `M:Ns.Type.Parse(System.String)`), by a position
 (`src/File.cs:12:17`) or by a dotted name; a name that matches several declarations returns the candidates.
@@ -124,6 +132,20 @@ The graph (symbols, references, and for each file its content hash, declarations
 written to `.paspan/graph.bin` next to the solution after a load and after each update. The next load reads it in
 about 0.2 s instead of loading in full, then compares the files, projects and referenced assemblies with the disk
 and updates what changed. A cache written by another build of the server or for another configuration is ignored.
+
+## Retrieval
+
+`PaspanCodeGraph.Search` turns the symbol index into a graph: an edge from a member to each type and member it
+references (calls, uses, type references, with the count and the best confidence), base types, interfaces,
+overrides, interface implementations and containment. PageRank over the use edges (a member's rank also flows to
+its type) measures how central a symbol is. `search_code` ranks with BM25 over each symbol's name (weighted most,
+split at case changes and also whole), containing type, namespace, documentation, signature, file name and, for a
+member, the words of its body; terms are stemmed and a query term also matches the terms it begins, and the score is
+raised by up to half for the most central symbols. On 20 questions about this repository with a known answer
+(`SearchQualityTests`), the expected symbol is among the first five results for 19 (mean reciprocal rank 0.76).
+Communities come from the Louvain method over the uses between top-level types; on this repository they separate
+the C#, Java, Python and SQL parsers, the parser combinators, the binder and the server's tools (modularity 0.66).
+There are no embeddings: everything stays managed and local.
 
 ## How projects are read
 
