@@ -430,7 +430,7 @@ public sealed partial class CSharpSymbolCollector
         if (bound?.Type is { } type)
         {
             var (line, column) = _source.Lines.GetLineAndColumn(offset);
-            _references.Add((type.Symbol.Id, new SymbolReference(_source.Path, offset, line, column, inMember, confidence)));
+            _references.Add((TargetId(type.Symbol), new SymbolReference(_source.Path, offset, line, column, inMember, confidence)));
         }
 
         return offset + System.Text.Encoding.UTF8.GetByteCount(name);

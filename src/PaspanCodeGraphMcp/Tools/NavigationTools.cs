@@ -250,6 +250,64 @@ public sealed class NavigationTools
             resolution.Candidates.Take(MaxCandidates).Select(c => SymbolFormatter.ToDto(c, snapshot)).ToList()));
     }
 
+    /// <summary>
+    /// A type or member of a referenced assembly named by its documentation id (<c>M:System.String.Split(System.Char[])</c>),
+    /// as a symbol outside the index, for finding the workspace's references to it; null for any other input.
+    /// </summary>
+    internal static CodeSymbol? ResolveExternal(WorkspaceSnapshot snapshot, string symbol)
+    {
+        symbol = symbol.Trim();
+        if (symbol.StartsWith(ReferenceTargets.External, StringComparison.Ordinal))
+        {
+            symbol = symbol[ReferenceTargets.External.Length..];
+        }
+
+        if (symbol.Length < 3 || symbol[1] != ':' || snapshot.Index.Get(symbol) != null)
+        {
+            return null;
+        }
+
+        var (type, member) = snapshot.Metadata.FindByDocId(symbol);
+        if (type == null || member == null && symbol[0] != 'T')
+        {
+            // Not in the referenced assemblies read, but the workspace may still refer to it by this id
+            return snapshot.Index.ReferencesTo(ReferenceTargets.External + symbol).Count == 0 ? null
+                : new CodeSymbol(symbol, symbol[0] switch { 'T' => SymbolKind.Class, 'P' => SymbolKind.Property, 'F' => SymbolKind.Field, 'E' => SymbolKind.Event, _ => SymbolKind.Method }, symbol[2..].Split('(')[0].Split('.')[^1])
+                {
+                    Assembly = "?",
+                    Signature = symbol[2..],
+                };
+        }
+
+        var kind = member?.Kind switch
+        {
+            null => type.Kind switch
+            {
+                PaspanCodeGraph.Metadata.MetadataTypeKind.Struct => SymbolKind.Struct,
+                PaspanCodeGraph.Metadata.MetadataTypeKind.Interface => SymbolKind.Interface,
+                PaspanCodeGraph.Metadata.MetadataTypeKind.Enum => SymbolKind.Enum,
+                PaspanCodeGraph.Metadata.MetadataTypeKind.Delegate => SymbolKind.Delegate,
+                _ => SymbolKind.Class,
+            },
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Constructor => SymbolKind.Constructor,
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Property => SymbolKind.Property,
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Indexer => SymbolKind.Indexer,
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Field => SymbolKind.Field,
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Event => SymbolKind.Event,
+            PaspanCodeGraph.Metadata.MetadataMemberKind.Operator => SymbolKind.Operator,
+            _ => SymbolKind.Method,
+        };
+        return new CodeSymbol(symbol, kind, member?.Name ?? type.Name)
+        {
+            Assembly = type.Assembly,
+            Namespace = type.Namespace.Length == 0 ? null : type.Namespace,
+            Signature = symbol[2..],
+        };
+    }
+
+    /// <summary>The id the index records references to <paramref name="symbol"/> under.</summary>
+    internal static string ReferenceId(CodeSymbol symbol) => symbol.IsExternal ? ReferenceTargets.External + symbol.Id : symbol.Id;
+
     private static SymbolKind? ParseKind(string? kind)
     {
         if (string.IsNullOrWhiteSpace(kind))

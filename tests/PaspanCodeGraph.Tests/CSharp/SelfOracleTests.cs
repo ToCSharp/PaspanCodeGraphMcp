@@ -13,4 +13,14 @@ public sealed class SelfOracleTests
         Assert.IsTrue(result.Result.Compared > 10000, report);
         Assert.IsTrue(result.Precision >= 0.95 && result.Recall >= 0.85, report);
     }
+
+    [TestMethod]
+    public void ExternalMemberReferences_MatchRoslyn()
+    {
+        var result = HierarchyComparison.MemberReferences(RoslynOracle.SelfSnapshot.Index, RoslynOracle.SelfCompilations, external: true);
+        var report = result.Report();
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "self-external-references-report.txt"), report.Split(" differ:")[0] + "\n" + string.Join("\n", result.Result.Differences));
+        Assert.IsTrue(result.Result.Compared > 5000, report);
+        Assert.IsTrue(result.Precision >= 0.95 && result.Recall >= 0.9, report);
+    }
 }

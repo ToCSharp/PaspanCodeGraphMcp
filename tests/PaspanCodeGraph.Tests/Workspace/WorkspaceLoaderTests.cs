@@ -133,4 +133,71 @@ public sealed class WorkspaceLoaderTests
         Assert.IsNotNull(snapshot.Index.Get("M:Lib.Broken.Good"));
         Assert.IsNotNull(snapshot.Index.Get("P:Lib.Broken.After"));
     }
+
+    [TestMethod]
+    public void Load_BindsMembersOfReferencedAssemblies()
+    {
+        using var workspace = new TempWorkspace();
+        var project = workspace.Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+            </Project>
+            """);
+        workspace.Write("Lib/Worker.cs", """
+            using System.Text;
+
+            namespace Lib;
+
+            public class Worker
+            {
+                public int Run(string text) => text.Length;
+
+                public void Chain(string csv, List<Worker> workers, Dictionary<string, Worker> byName)
+                {
+                    var parts = csv.Trim().Split(',');
+                    var count = parts.Length;
+                    workers.First().Run(parts[0]);
+                    workers.Where(w => w.Run("") > count).Select(w => w).ToList().ForEach(w => w.Run(csv));
+                    if (byName.TryGetValue("x", out var found))
+                    {
+                        found.Run(csv.Substring(1));
+                    }
+
+                    var builder = new StringBuilder();
+                    builder.Append(count).AppendLine(csv);
+                    Console.WriteLine(builder.ToString());
+                }
+            }
+            """);
+
+        var snapshot = WorkspaceLoader.Load(project);
+
+        Assert.IsTrue(snapshot.Metadata.TypeCount > 1000, $"{snapshot.Metadata.TypeCount} types read");
+        var targets = snapshot.Index.ReferencesFrom("M:Lib.Worker.Chain(System.String,System.Collections.Generic.List{Lib.Worker},System.Collections.Generic.Dictionary{System.String,Lib.Worker})")
+            .GroupBy(r => r.TargetId)
+            .ToDictionary(g => g.Key, g => g.Select(r => r.Reference.Confidence).ToList());
+        foreach (var expected in new[]
+        {
+            "external:M:System.String.Trim",
+            "external:M:System.String.Split(System.Char,System.StringSplitOptions)",
+            "external:P:System.Array.Length",
+            "external:M:System.Linq.Enumerable.First``1(System.Collections.Generic.IEnumerable{``0})",
+            "external:M:System.Linq.Enumerable.Where``1(System.Collections.Generic.IEnumerable{``0},System.Func{``0,System.Boolean})",
+            "external:M:System.Collections.Generic.List`1.ForEach(System.Action{`0})",
+            "external:M:System.Collections.Generic.Dictionary`2.TryGetValue(`0,`1@)",
+            "external:M:System.String.Substring(System.Int32)",
+            "external:M:System.Text.StringBuilder.#ctor",
+            "external:M:System.Text.StringBuilder.Append(System.Int32)",
+            "external:M:System.Text.StringBuilder.AppendLine(System.String)",
+            "external:M:System.Console.WriteLine(System.String)",
+        })
+        {
+            Assert.IsTrue(targets.TryGetValue(expected, out var confidences) && confidences.All(c => c == Confidence.Exact), $"{expected}: {string.Join(", ", targets.Keys.Order())}");
+        }
+
+        // The calls of a workspace member through the chains are bound too
+        var run = targets["M:Lib.Worker.Run(System.String)"];
+        Assert.AreEqual(4, run.Count, string.Join(", ", run));
+        Assert.IsTrue(run.All(c => c != Confidence.NameOnly), string.Join(", ", run));
+    }
 }

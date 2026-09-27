@@ -39,9 +39,14 @@ public sealed record NamedType(CodeSymbol Symbol, IReadOnlyList<SemType> Argumen
     public override string ToString() => Arguments.Count == 0 ? Symbol.Name : $"{Symbol.Name}<{string.Join(", ", Arguments)}>";
 }
 
-/// <summary>A type from a referenced assembly: its simple name (<c>List</c>), the name as written or known in full, and its type arguments.</summary>
+/// <summary>
+/// A type from a referenced assembly: its simple name (<c>List</c>), the name as written or known in full, and its
+/// type arguments. <see cref="Definition"/> is the type read from the assembly, when it was found.
+/// </summary>
 public sealed record ExternalType(string Name, string FullName, IReadOnlyList<SemType> Arguments) : SemType
 {
+    public PaspanCodeGraph.Metadata.MetadataType? Definition { get; init; }
+
     public bool Equals(ExternalType? other) => other is not null && other.Name == Name && SemTypes.SameList(Arguments, other.Arguments);
 
     public override int GetHashCode() => Name.GetHashCode(StringComparison.Ordinal);
@@ -250,11 +255,8 @@ public static class SemTypes
                 return new ExternalType("IEnumerable", "System.Collections.Generic.IEnumerable", [map.Arguments[0]]);
             case "Values" when underlying is ExternalType { Arguments.Count: 2 } map && Dictionaries.Contains(map.Name):
                 return new ExternalType("IEnumerable", "System.Collections.Generic.IEnumerable", [map.Arguments[1]]);
-            case "Item1" or "Item2" or "Item3" or "Item4" or "Item5" or "Item6" or "Item7" when underlying is TupleType tuple:
-            {
-                var index = name[^1] - '1';
-                return index < tuple.Elements.Count ? tuple.Elements[index] : null;
-            }
+            case ['I', 't', 'e', 'm', .. var digits] when underlying is TupleType tuple && int.TryParse(digits, out var item) && item >= 1:
+                return item <= tuple.Elements.Count ? tuple.Elements[item - 1] : null;
 
             default:
                 if (underlying is TupleType named && named.Names.ToList().IndexOf(name) is var position and >= 0)

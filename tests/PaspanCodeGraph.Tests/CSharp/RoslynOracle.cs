@@ -130,8 +130,8 @@ internal static class RoslynOracle
     public static bool IsSource(ISymbol symbol) => symbol.Locations.Any(l => l.IsInSource);
 
     /// <summary>
-    /// Whether the id of a type can be computed without references: predefined types, type parameters, workspace
-    /// types, and arrays, pointers, nullables and tuples of those.
+    /// Whether the id of a type can be computed: any type but an error type (the referenced assemblies are read), and
+    /// arrays, pointers, nullables and tuples of those.
     /// </summary>
     public static bool IsExact(ITypeSymbol type) => type switch
     {
@@ -142,7 +142,8 @@ internal static class RoslynOracle
         INamedTypeSymbol { IsTupleType: true } tuple => tuple.TupleElements.All(e => IsExact(e.Type)),
         INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable => IsExact(nullable.TypeArguments[0]),
         INamedTypeSymbol { TypeKind: TypeKind.Error } => false,
-        INamedTypeSymbol named when IsSource(named) => AllTypeArguments(named).All(IsExact),
+        // Types from references are read from their assemblies, so their ids are known as well
+        INamedTypeSymbol named => AllTypeArguments(named).All(IsExact),
         _ => type.SpecialType != SpecialType.None && type.SpecialType != SpecialType.System_Nullable_T,
     };
 

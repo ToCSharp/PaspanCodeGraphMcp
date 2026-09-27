@@ -23,7 +23,7 @@ public sealed record FindCallersResult(
     int NameOnlyCallSites);
 
 /// <param name="Symbol">The workspace member; null for a member of a type from a referenced assembly (see <see cref="Id"/>).</param>
-/// <param name="Id">The member's id; for a type from a referenced assembly, the id it would have (its namespace may be missing).</param>
+/// <param name="Id">The member's id; for a member of a type from a referenced assembly, its documentation id (the type is written as in source when the assembly was not found).</param>
 /// <param name="Implementations">Known overrides or implementations when the call is virtual or through an interface.</param>
 public sealed record CalleeDto(
     string Id,
@@ -54,7 +54,7 @@ public sealed class CallGraphTools
     [Description("Who calls a method, constructor, property, indexer or event: each call site with the calling member. Calls are bound like the compiler binds them (receiver type, overloads, extension methods, lambdas); Exact when every type involved is known, Inferred when some were inferred. Calls to a member this one overrides or implements are included with isDirect=false. Calls on receivers of unknown type (bound only by name) are counted in nameOnlyCallSites and listed with includeNameOnly=true.")]
     public static async Task<object> FindCallers(
         WorkspaceHost host,
-        [Description("Member id, 'file.cs:line:col', or a (dotted) name such as 'Parser.Parse'")] string symbol,
+        [Description("Member id, 'file.cs:line:col', or a (dotted) name such as 'Parser.Parse'; for a member of a referenced assembly, its documentation id (M:System.Console.WriteLine(System.String))")] string symbol,
         [Description("Maximum call sites (default 50)")] int maxResults = 50,
         [Description("Call sites to skip, for paging (default 0)")] int offset = 0,
         [Description("Include call sites in test files (default true; they are flagged isTest)")] bool includeTests = true,
@@ -62,7 +62,7 @@ public sealed class CallGraphTools
         CancellationToken ct = default)
     {
         var snapshot = await host.RequireSnapshotAsync(ct);
-        var (resolved, ambiguous) = NavigationTools.Resolve(snapshot, symbol);
+        var (resolved, ambiguous) = NavigationTools.ResolveExternal(snapshot, symbol) is { } external ? (external, null) : NavigationTools.Resolve(snapshot, symbol);
         if (resolved is null)
         {
             return ambiguous!;
@@ -77,7 +77,7 @@ public sealed class CallGraphTools
         var nameOnly = 0;
         foreach (var target in CalledAs(resolved))
         {
-            foreach (var reference in snapshot.Index.ReferencesTo(target.Id))
+            foreach (var reference in snapshot.Index.ReferencesTo(NavigationTools.ReferenceId(target)))
             {
                 if (!includeTests && SymbolFormatter.IsTestPath(reference.File))
                 {
@@ -123,7 +123,7 @@ public sealed class CallGraphTools
     }
 
     [McpServerTool(Name = "find_callees", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Find callees")]
-    [Description("What a member's body calls or uses: methods, constructors, properties, indexers, events and method groups, each bound to its declaration (overloads and extension methods resolved), with the number of calls and the first line. For a type, the callees of all its members. Members of types from referenced assemblies are listed with the id they would have (external). Virtual and interface targets are flagged with their known implementation count. Calls on receivers of unknown type are counted in nameOnly and listed with includeNameOnly=true; calls that could not be bound at all are listed by name in unresolved. Fields and enum members are not callees; use find_references for them.")]
+    [Description("What a member's body calls or uses: methods, constructors, properties, indexers, events and method groups, each bound to its declaration (overloads and extension methods resolved), with the number of calls and the first line. For a type, the callees of all its members. Members of types from referenced assemblies are listed with their documentation ids (external), bound through the reference assemblies of the framework and the NuGet packages. Virtual and interface targets are flagged with their known implementation count. Calls on receivers of unknown type are counted in nameOnly and listed with includeNameOnly=true; calls that could not be bound at all are listed by name in unresolved. Fields and enum members are not callees; use find_references for them.")]
     public static async Task<object> FindCallees(
         WorkspaceHost host,
         [Description("Member or type id, 'file.cs:line:col', or a (dotted) name")] string symbol,
@@ -159,6 +159,12 @@ public sealed class CallGraphTools
                 }
 
                 var isExternal = targetId.StartsWith(ReferenceTargets.External, StringComparison.Ordinal);
+                if (isExternal && targetId.Length > ReferenceTargets.External.Length + 1 && targetId[ReferenceTargets.External.Length] is 'T' or 'F')
+                {
+                    // Types and fields of references are not callees
+                    continue;
+                }
+
                 if (!isExternal && snapshot.Index.Get(targetId) is not { Kind: SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator })
                 {
                     continue;

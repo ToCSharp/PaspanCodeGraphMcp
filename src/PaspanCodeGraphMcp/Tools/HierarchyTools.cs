@@ -206,10 +206,10 @@ public sealed class HierarchyTools
     }
 
     [McpServerTool(Name = "find_references", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Find references")]
-    [Description("References to a type or member across the workspace, grouped by file, each with the member it is in. Types: in signatures, base lists, attributes, usings, generic arguments, 'new', casts, typeof, patterns and static member access. Members: calls (overloads and extension methods resolved), property, field and event accesses, object initializers, indexers ('[' of the access), constructor calls ('new', ': base(...)', attributes) and method groups. Exact when every type involved is known, Inferred when a type was inferred or a same-named local could hide a type. For a virtual or interface member, references to its overrides, implementations and the members it overrides or implements are included (includeImplementations=false restricts to the member itself). References on receivers of unknown type, bound only by name, are counted in nameOnly and listed with includeNameOnly=true.")]
+    [Description("References to a type or member across the workspace, grouped by file, each with the member it is in. Types: in signatures, base lists, attributes, usings, generic arguments, 'new', casts, typeof, patterns and static member access. Members: calls (overloads and extension methods resolved), property, field and event accesses, object initializers, indexers ('[' of the access), constructor calls ('new', ': base(...)', attributes) and method groups. Exact when every type involved is known, Inferred when a type was inferred or a same-named local could hide a type. For a virtual or interface member, references to its overrides, implementations and the members it overrides or implements are included (includeImplementations=false restricts to the member itself). References on receivers of unknown type, bound only by name, are counted in nameOnly and listed with includeNameOnly=true. Types and members of referenced assemblies (framework, NuGet packages) are found by their documentation id.")]
     public static async Task<object> FindReferences(
         WorkspaceHost host,
-        [Description("Type or member id, 'file.cs:line:col', or a (dotted) name")] string symbol,
+        [Description("Type or member id, 'file.cs:line:col', or a (dotted) name; for a type or member of a referenced assembly, its documentation id (M:System.String.Split(System.Char[]))")] string symbol,
         [Description("Maximum references (default 200)")] int maxResults = 200,
         [Description("References to skip, for paging (default 0)")] int offset = 0,
         [Description("For a virtual or interface member, also the references to the members it is related to by overriding or implementing (default true)")] bool includeImplementations = true,
@@ -217,7 +217,7 @@ public sealed class HierarchyTools
         CancellationToken ct = default)
     {
         var snapshot = await host.RequireSnapshotAsync(ct);
-        var (resolved, ambiguous) = NavigationTools.Resolve(snapshot, symbol);
+        var (resolved, ambiguous) = NavigationTools.ResolveExternal(snapshot, symbol) is { } external ? (external, null) : NavigationTools.Resolve(snapshot, symbol);
         if (resolved is null)
         {
             return ambiguous!;
@@ -243,7 +243,7 @@ public sealed class HierarchyTools
         var all = new List<(SymbolReference Reference, CodeSymbol Target)>();
         foreach (var target in targets)
         {
-            foreach (var reference in snapshot.Index.ReferencesTo(target.Id))
+            foreach (var reference in snapshot.Index.ReferencesTo(NavigationTools.ReferenceId(target)))
             {
                 if (reference.Confidence == Confidence.NameOnly)
                 {

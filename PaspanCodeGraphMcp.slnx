@@ -2,6 +2,8 @@
   <Folder Name="/src/">
     <Project Path="src/PaspanCodeGraph.Core/PaspanCodeGraph.Core.csproj" />
     <Project Path="src/PaspanCodeGraph.CSharp/PaspanCodeGraph.CSharp.csproj" />
+    <Project Path="src/PaspanCodeGraph.Metadata/PaspanCodeGraph.Metadata.csproj" />
+    <Project Path="src/PaspanCodeGraph.Search/PaspanCodeGraph.Search.csproj" />
     <Project Path="src/PaspanCodeGraph.Workspace/PaspanCodeGraph.Workspace.csproj" />
     <Project Path="src/PaspanCodeGraphMcp/PaspanCodeGraphMcp.csproj" />
   </Folder>

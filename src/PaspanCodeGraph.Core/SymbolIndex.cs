@@ -153,7 +153,8 @@ public sealed class SymbolIndex
         {
             if (id.StartsWith(ReferenceTargets.External, StringComparison.Ordinal))
             {
-                external += list.Count;
+                // Members only, not the types of references named in the sources
+                external += id.AsSpan(ReferenceTargets.External.Length).StartsWith("T:") ? 0 : list.Count;
             }
             else if (id.StartsWith(ReferenceTargets.Unresolved, StringComparison.Ordinal))
             {
@@ -200,6 +201,9 @@ public sealed class SymbolIndex
 
         return null;
     }
+
+    /// <summary>The ids that references were recorded to: workspace symbols and <see cref="ReferenceTargets"/> ids.</summary>
+    public IEnumerable<string> ReferenceTargetIds => _references.Keys;
 
     /// <summary>The number of references recorded.</summary>
     public int ReferenceCount => _references.Values.Sum(l => l.Count);

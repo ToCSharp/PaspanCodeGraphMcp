@@ -225,7 +225,8 @@ public sealed partial class CSharpBinder
             var id = DocumentationIds.TypeId(reference, context.TypeParameters, Resolver(outside));
             if (!links.Any(l => l.Id == id))
             {
-                links.Add(new TypeLink(written, bound?.Symbol, id, bound?.OwnArguments ?? []));
+                // A type from a reference is known by its full name, not linked
+                links.Add(new TypeLink(written, bound?.Symbol is { IsExternal: false } symbol ? symbol : null, id, bound?.OwnArguments ?? []));
             }
         }
 
@@ -363,7 +364,7 @@ public sealed partial class CSharpBinder
                     return new BoundName(null, Implicit(type, context));
                 }
 
-                if (!typeOnly && arity == 0 && _builder.Get("N:" + full) != null)
+                if (!typeOnly && arity == 0 && IsNamespace(full))
                 {
                     return new BoundName(full, null);
                 }
@@ -489,7 +490,7 @@ public sealed partial class CSharpBinder
                 return new BoundName(null, Plain(type, context));
             }
 
-            return arity == 0 && _builder.Get("N:" + full) != null ? new BoundName(full, null) : null;
+            return arity == 0 && IsNamespace(full) ? new BoundName(full, null) : null;
         }
 
         if (container.Type is { } outer && FindNestedType(outer.Symbol, name, arity) is { } nested)
@@ -507,11 +508,17 @@ public sealed partial class CSharpBinder
         return null;
     }
 
-    /// <summary>A workspace type by metadata name (<c>Ns.Outer`1.Inner</c> without arity) and arity.</summary>
+    /// <summary>A workspace type, else a type of a referenced assembly, by metadata name (<c>Ns.Outer`1.Inner</c> without arity) and arity.</summary>
     private CodeSymbol? FindType(string dottedName, int arity)
     {
-        var symbol = _builder.Get("T:" + (arity == 0 ? dottedName : $"{dottedName}`{arity}"));
-        return symbol is { Kind: var kind } && kind.IsType() ? symbol : null;
+        var key = arity == 0 ? dottedName : $"{dottedName}`{arity}";
+        var symbol = _builder.Get("T:" + key);
+        if (symbol is { Kind: var kind } && kind.IsType())
+        {
+            return symbol;
+        }
+
+        return Metadata.TypeCount != 0 && Metadata.FindType(key) is { } external ? ExternalSymbol(external) : null;
     }
 
     /// <summary>A type nested in <paramref name="type"/> or inherited from its base types.</summary>
@@ -522,6 +529,11 @@ public sealed partial class CSharpBinder
         if (depth > 16)
         {
             return null;
+        }
+
+        if (type.IsExternal)
+        {
+            return FindExternalNestedType(type, name, arity, depth);
         }
 
         var nested = _builder.Get($"{type.Id}.{(arity == 0 ? name : $"{name}`{arity}")}");
