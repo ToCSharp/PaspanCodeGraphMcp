@@ -10,10 +10,10 @@ namespace PaspanCodeGraph.CSharp;
 /// (<c>System.Collections.Generic.List{System.Int32}</c>); predefined types and type parameters are exact.
 /// </summary>
 /// <summary>
-/// The full name (<c>Ns.Outer.Type</c>, without type arguments) of the type a simple name with
-/// <paramref name="arity"/> type arguments refers to, when it is known; else null.
+/// The id form of the type a named type reference refers to (<c>Ns.Outer{System.Int32}.Inner</c>), when it is
+/// known; else null, and the name is written as in source.
 /// </summary>
-public delegate string? TypeResolver(string name, int arity);
+public delegate string? TypeResolver(NamedTypeReference type);
 
 public static class DocumentationIds
 {
@@ -102,6 +102,23 @@ public static class DocumentationIds
         var builder = new StringBuilder();
         AppendType(builder, type, typeParameters, resolveType);
         return builder.ToString();
+    }
+
+    /// <summary>Appends the id form of a type argument list: <c>{System.Int32,`0}</c>.</summary>
+    public static string TypeArgumentList(IReadOnlyList<TypeReference> arguments, IReadOnlyDictionary<string, string> typeParameters, TypeResolver? resolveType)
+    {
+        var builder = new StringBuilder("{");
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            if (i != 0)
+            {
+                builder.Append(',');
+            }
+
+            AppendType(builder, arguments[i], typeParameters, resolveType);
+        }
+
+        return builder.Append('}').ToString();
     }
 
     private static void AppendType(StringBuilder builder, TypeReference type, IReadOnlyDictionary<string, string> typeParameters, TypeResolver? resolveType)
@@ -200,6 +217,22 @@ public static class DocumentationIds
 
     private static void AppendNamed(StringBuilder builder, NamedTypeReference named, IReadOnlyDictionary<string, string> typeParameters, TypeResolver? resolveType)
     {
+        if (named.Qualifier == null && named.TypeArguments == null && named.Name.Parts.Count == 1)
+        {
+            if (typeParameters.TryGetValue(named.Name.Parts[0], out var parameter))
+            {
+                // T? of an unconstrained or reference type parameter has the id of T
+                builder.Append(parameter);
+                return;
+            }
+        }
+
+        if (resolveType?.Invoke(named) is { } resolved)
+        {
+            builder.Append(resolved);
+            return;
+        }
+
         if (named.Qualifier != null)
         {
             AppendType(builder, named.Qualifier, typeParameters, resolveType);
@@ -209,13 +242,6 @@ public static class DocumentationIds
         var parts = named.Name.Parts;
         if (named.Qualifier == null && named.TypeArguments == null && parts.Count == 1)
         {
-            if (typeParameters.TryGetValue(parts[0], out var parameter))
-            {
-                // T? of an unconstrained or reference type parameter has the id of T
-                builder.Append(parameter);
-                return;
-            }
-
             if (ContextualNames.TryGetValue(parts[0], out var contextual))
             {
                 builder.Append(contextual);
@@ -223,8 +249,7 @@ public static class DocumentationIds
             }
         }
 
-        var arity = named.TypeArguments?.Count ?? 0;
-        builder.Append(named.Qualifier == null && parts.Count == 1 && resolveType?.Invoke(parts[0], arity) is { } full ? full : string.Join(".", parts));
+        builder.Append(string.Join(".", parts));
         if (named.TypeArguments is { Count: > 0 } arguments)
         {
             builder.Append('{');
@@ -286,7 +311,10 @@ public static class DocumentationIds
             return name;
         }
 
-        var prefix = TypeId(explicitInterface, typeParameters, resolveType).Replace('.', '#');
+        // Type parameters are written by name there, as in source: "Ns#IConvert{T,System#String}#Convert"
+        var names = typeParameters.ToDictionary(p => p.Value, p => p.Key, StringComparer.Ordinal);
+        var id = TypeId(explicitInterface, typeParameters, resolveType);
+        var prefix = System.Text.RegularExpressions.Regex.Replace(id, @"(?<!`)`\d+", m => names.GetValueOrDefault(m.Value, m.Value)).Replace('.', '#');
         return $"{prefix}#{name}";
     }
 }

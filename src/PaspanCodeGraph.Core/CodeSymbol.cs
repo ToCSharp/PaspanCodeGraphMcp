@@ -45,6 +45,28 @@ public static class SymbolKinds
 /// <param name="Column">1-based column of the declared name, in UTF-16 code units.</param>
 public sealed record SourceLocation(string File, int Start, int End, int Line, int Column);
 
+/// <summary>How sure a relation found without a compiler is.</summary>
+public enum Confidence
+{
+    /// <summary>Bound by name lookup as the compiler does it.</summary>
+    Exact,
+
+    /// <summary>Most likely right; a same-named local, parameter or member could hide it.</summary>
+    Inferred,
+}
+
+/// <summary>A place in source that refers to a symbol.</summary>
+/// <param name="Start">Byte offset of the name in the file's UTF-8 source.</param>
+/// <param name="Line">1-based line of the name.</param>
+/// <param name="Column">1-based column of the name, in UTF-16 code units.</param>
+/// <param name="InMember">Id of the declaration the reference is in (a member, or a type for its base list and attributes).</param>
+public sealed record SymbolReference(string File, int Start, int Line, int Column, string? InMember, Confidence Confidence);
+
+/// <summary>A base type or interface of a type as written, and the workspace type it names when it was found.</summary>
+/// <param name="Id">Id form of the type (<c>Ns.Base{System.Int32}</c>), written as in source when it was not found.</param>
+/// <param name="TypeArguments">Id forms of the type arguments of the last part, for mapping type parameters.</param>
+public sealed record TypeLink(string Written, CodeSymbol? Symbol, string Id, IReadOnlyList<string> TypeArguments);
+
 /// <summary>A parameter as written in source.</summary>
 public sealed record ParameterInfo(string Name, string? Type, string? Modifier, string? DefaultValue);
 
@@ -103,6 +125,25 @@ public sealed class CodeSymbol
 
     /// <summary>The documentation comment XML, without the comment markers.</summary>
     public string? Documentation { get; set; }
+
+    /// <summary>The base class and interfaces, resolved where they are workspace types.</summary>
+    public List<TypeLink> Bases { get; } = [];
+
+    /// <summary>The types that list this one among their <see cref="Bases"/>.</summary>
+    public List<CodeSymbol> DerivedTypes { get; } = [];
+
+    /// <summary>The interface of an explicit interface implementation, when it was found.</summary>
+    public TypeLink? ExplicitInterface { get; set; }
+
+    /// <summary>The member of a base class this one overrides.</summary>
+    public CodeSymbol? Overrides { get; set; }
+
+    public List<CodeSymbol> OverriddenBy { get; } = [];
+
+    /// <summary>The interface members this member implements, in this type or in types derived from it.</summary>
+    public List<CodeSymbol> Implements { get; } = [];
+
+    public List<CodeSymbol> ImplementedBy { get; } = [];
 
     /// <summary>The containing type, if any.</summary>
     public CodeSymbol? ContainingType => Container is { Kind: var kind } && (kind.IsType() || kind == SymbolKind.Extension) ? Container : null;

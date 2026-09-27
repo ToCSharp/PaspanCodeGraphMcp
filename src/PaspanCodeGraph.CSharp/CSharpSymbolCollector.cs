@@ -9,37 +9,90 @@ namespace PaspanCodeGraph.CSharp;
 /// <param name="Utf8">The file's source as UTF-8 without the byte order mark; spans are offsets into it.</param>
 public sealed record CSharpSource(string Path, string Project, ReadOnlyMemory<byte> Utf8, LineMap Lines, CompilationUnit Unit);
 
+/// <summary>What a pass over the files of a workspace collects.</summary>
+public enum CollectPass
+{
+    /// <summary>Namespaces and types, their base lists and the global usings: what names are bound against.</summary>
+    Types,
+
+    /// <summary>Members and enum members, with ids whose parameter types are bound.</summary>
+    Members,
+
+    /// <summary>References to types in declarations and bodies.</summary>
+    References,
+}
+
 /// <summary>
 /// Adds the declarations of a parsed C# file to a <see cref="SymbolIndexBuilder"/>: namespaces, types,
 /// members and enum members, with documentation-comment ids (<see cref="DocumentationIds"/>), signatures,
-/// modifiers and the location of each declared name.
+/// modifiers and the location of each declared name. A workspace is collected in passes (<see cref="CollectPass"/>)
+/// over all its files, so that every type is known before names are bound.
 /// </summary>
-public sealed class CSharpSymbolCollector
+public sealed partial class CSharpSymbolCollector
 {
-    private static readonly IReadOnlyDictionary<string, string> NoTypeParameters = new Dictionary<string, string>();
+    private static readonly IReadOnlyDictionary<string, string> NoTypeParameters = BindingContext.NoTypeParameters;
 
     private readonly CSharpSource _source;
     private readonly SymbolIndexBuilder _builder;
+    private readonly CSharpBinder _binder;
+    private readonly CollectPass _pass;
 
-    private CSharpSymbolCollector(CSharpSource source, SymbolIndexBuilder builder)
+    private CSharpSymbolCollector(CSharpSource source, SymbolIndexBuilder builder, CSharpBinder binder, CollectPass pass)
     {
         _source = source;
         _builder = builder;
+        _binder = binder;
+        _pass = pass;
     }
 
     private ReadOnlySpan<byte> Utf8 => _source.Utf8.Span;
 
+    /// <summary>Collects a file on its own: its types, then its members (names bind only to types of this file).</summary>
     public static void Collect(CSharpSource source, SymbolIndexBuilder builder)
     {
-        var collector = new CSharpSymbolCollector(source, builder);
-        collector.VisitMembers(source.Unit.Members, new Scope(null, null, NoTypeParameters, 0));
+        var binder = new CSharpBinder(builder);
+        Collect(source, builder, binder, CollectPass.Types);
+        Collect(source, builder, binder, CollectPass.Members);
+        CSharpHierarchy.Link(builder, binder);
     }
 
     /// <summary>
-    /// Where a declaration is: the namespace symbol (null for the global namespace), the containing type and the
-    /// type parameters in scope with their id forms.
+    /// Runs one pass over a file. <see cref="CollectPass.References"/> returns the references found (to add to
+    /// the builder afterwards, so that files can be walked in parallel); the other passes return nothing.
     /// </summary>
-    private sealed record Scope(CodeSymbol? Namespace, CodeSymbol? Type, IReadOnlyDictionary<string, string> TypeParameters, int TypeParameterCount, bool InExtension = false)
+    public static List<(string TargetId, SymbolReference Reference)> Collect(CSharpSource source, SymbolIndexBuilder builder, CSharpBinder binder, CollectPass pass)
+    {
+        var collector = new CSharpSymbolCollector(source, builder, binder, pass);
+        var unit = source.Unit;
+        var fileScope = new ImportScope(null, "") { Globals = binder.ProjectScope(source.Project) };
+        foreach (var directive in unit.Usings ?? [])
+        {
+            if (!directive.IsGlobal)
+            {
+                fileScope.AddUsing(directive);
+            }
+            else if (pass == CollectPass.Types)
+            {
+                binder.ProjectScope(source.Project).AddUsing(directive);
+            }
+        }
+
+        var scope = new Scope(null, null, NoTypeParameters, 0, fileScope);
+        if (pass == CollectPass.References)
+        {
+            collector.WalkUsings(unit.Usings, scope);
+            collector.WalkAttributes(unit.GlobalAttributes, scope, null);
+        }
+
+        collector.VisitMembers(unit.Members, scope);
+        return collector._references;
+    }
+
+    /// <summary>
+    /// Where a declaration is: the namespace symbol (null for the global namespace), the containing type, the type
+    /// parameters in scope with their id forms and the import scopes names are looked up in.
+    /// </summary>
+    private sealed record Scope(CodeSymbol? Namespace, CodeSymbol? Type, IReadOnlyDictionary<string, string> TypeParameters, int TypeParameterCount, ImportScope Imports, bool InExtension = false)
     {
         public CodeSymbol? Container => Type ?? Namespace;
 
@@ -48,47 +101,13 @@ public sealed class CSharpSymbolCollector
 
         public string Qualify(string name) => ContainerIdBody is { } body ? $"{body}.{name}" : name;
 
-        /// <summary>
-        /// Names of the containing types and of their nested types declared so far, which a simple name in a
-        /// signature most likely means. Types nested in generic types are left as written: their ids need the type
-        /// arguments of each containing type.
-        /// </summary>
-        public string? ResolveType(string name, int arity)
-        {
-            for (var type = Type; type != null; type = type.ContainingType)
-            {
-                if (type.Name == name && type.TypeParameters.Count == arity)
-                {
-                    return FullName(type);
-                }
-
-                foreach (var member in type.Members)
-                {
-                    if (member.Kind.IsType() && member.Name == name && member.TypeParameters.Count == arity)
-                    {
-                        return FullName(member);
-                    }
-                }
-            }
-
-            return null;
-        }
-
-        private static string? FullName(CodeSymbol type)
-        {
-            for (var container = type.ContainingType; container != null; container = container.ContainingType)
-            {
-                if (container.TypeParameters.Count != 0)
-                {
-                    return null;
-                }
-            }
-
-            var body = type.Id[2..];
-            var backtick = body.LastIndexOf('`');
-            return backtick > body.LastIndexOf('.') ? body[..backtick] : body;
-        }
+        public BindingContext Context => new(Imports, Type, TypeParameters);
     }
+
+    private TypeResolver Resolver(Scope scope) => _binder.Resolver(scope.Context);
+
+    private TypeResolver Resolver(Scope scope, IReadOnlyDictionary<string, string> typeParameters) =>
+        _binder.Resolver(scope.Context with { TypeParameters = typeParameters });
 
     private void VisitMembers(IReadOnlyList<MemberDeclaration>? members, Scope scope)
     {
@@ -105,6 +124,17 @@ public sealed class CSharpSymbolCollector
 
     private void VisitMember(MemberDeclaration member, Scope scope)
     {
+        if (_pass == CollectPass.References && member is not (NamespaceDeclaration or TypeDeclaration or DelegateDeclaration or ExtensionBlockDeclaration))
+        {
+            WalkMember(member, scope);
+            return;
+        }
+
+        if (_pass == CollectPass.Types && member is not (NamespaceDeclaration or TypeDeclaration or DelegateDeclaration))
+        {
+            return;
+        }
+
         switch (member)
         {
             case NamespaceDeclaration ns:
@@ -138,7 +168,7 @@ public sealed class CSharpSymbolCollector
             {
                 var isStatic = ctor.Modifiers.HasFlag(Modifiers.Static);
                 var name = isStatic ? "#cctor" : "#ctor";
-                var symbol = AddMember(ctor, SymbolKind.Constructor, ctor.Name, $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(ctor.Parameters, scope.TypeParameters, scope.ResolveType)}", scope, ctor.Span.Start);
+                var symbol = AddMember(ctor, SymbolKind.Constructor, ctor.Name, $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(ctor.Parameters, scope.TypeParameters, Resolver(scope))}", scope, ctor.Span.Start);
                 if (symbol != null)
                 {
                     SetParameters(symbol, ctor.Parameters);
@@ -161,8 +191,9 @@ public sealed class CSharpSymbolCollector
 
             case PropertyDeclaration p:
             {
-                var name = DocumentationIds.MemberName(p.Name, p.ExplicitInterface, scope.TypeParameters, scope.ResolveType);
+                var name = DocumentationIds.MemberName(p.Name, p.ExplicitInterface, scope.TypeParameters, Resolver(scope));
                 var symbol = AddMember(p, SymbolKind.Property, p.Name, $"P:{scope.Qualify(name)}", scope, After(p.ExplicitInterface ?? p.Type, p));
+                LinkExplicitInterface(symbol, p.ExplicitInterface, scope);
                 if (symbol != null)
                 {
                     symbol.Type = Text(p.Type);
@@ -174,9 +205,10 @@ public sealed class CSharpSymbolCollector
 
             case IndexerDeclaration indexer:
             {
-                var name = DocumentationIds.MemberName("Item", indexer.ExplicitInterface, scope.TypeParameters, scope.ResolveType);
-                var id = $"P:{scope.Qualify(name)}{DocumentationIds.ParameterList(indexer.Parameters, scope.TypeParameters, scope.ResolveType)}";
+                var name = DocumentationIds.MemberName("Item", indexer.ExplicitInterface, scope.TypeParameters, Resolver(scope));
+                var id = $"P:{scope.Qualify(name)}{DocumentationIds.ParameterList(indexer.Parameters, scope.TypeParameters, Resolver(scope))}";
                 var symbol = AddMember(indexer, SymbolKind.Indexer, "this[]", id, scope, After(indexer.ExplicitInterface ?? indexer.Type, indexer), nameText: "this");
+                LinkExplicitInterface(symbol, indexer.ExplicitInterface, scope);
                 if (symbol != null)
                 {
                     symbol.Type = Text(indexer.Type);
@@ -203,8 +235,9 @@ public sealed class CSharpSymbolCollector
             case EventDeclaration e:
                 foreach (var variable in e.Variables)
                 {
-                    var name = DocumentationIds.MemberName(variable.Name, e.ExplicitInterface, scope.TypeParameters, scope.ResolveType);
+                    var name = DocumentationIds.MemberName(variable.Name, e.ExplicitInterface, scope.TypeParameters, Resolver(scope));
                     var symbol = AddMember(e, SymbolKind.Event, variable.Name, $"E:{scope.Qualify(name)}", scope, variable.Span.Start, span: e.Span);
+                    LinkExplicitInterface(symbol, e.ExplicitInterface, scope);
                     if (symbol != null)
                     {
                         symbol.Type = Text(e.Type);
@@ -217,9 +250,10 @@ public sealed class CSharpSymbolCollector
             case OperatorDeclaration op:
             {
                 var parameterCount = op.Parameters?.Count ?? 0;
-                var name = DocumentationIds.MemberName(DocumentationIds.OperatorName(op.Operator, parameterCount, op.IsChecked), op.ExplicitInterface, scope.TypeParameters, scope.ResolveType);
-                var id = $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(op.Parameters, scope.TypeParameters, scope.ResolveType)}";
+                var name = DocumentationIds.MemberName(DocumentationIds.OperatorName(op.Operator, parameterCount, op.IsChecked), op.ExplicitInterface, scope.TypeParameters, Resolver(scope));
+                var id = $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(op.Parameters, scope.TypeParameters, Resolver(scope))}";
                 var symbol = AddMember(op, SymbolKind.Operator, "operator " + op.Operator, id, scope, After(op.ReturnType, op), nameText: "operator");
+                LinkExplicitInterface(symbol, op.ExplicitInterface, scope);
                 if (symbol != null)
                 {
                     symbol.Type = Text(op.ReturnType);
@@ -233,9 +267,10 @@ public sealed class CSharpSymbolCollector
             case ConversionOperatorDeclaration conversion:
             {
                 var name = conversion.IsImplicit ? "op_Implicit" : conversion.IsChecked ? "op_CheckedExplicit" : "op_Explicit";
-                var id = $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(conversion.Parameters, scope.TypeParameters, scope.ResolveType)}~{DocumentationIds.TypeId(conversion.Type, scope.TypeParameters, scope.ResolveType)}";
+                var id = $"M:{scope.Qualify(name)}{DocumentationIds.ParameterList(conversion.Parameters, scope.TypeParameters, Resolver(scope))}~{DocumentationIds.TypeId(conversion.Type, scope.TypeParameters, Resolver(scope))}";
                 var keyword = conversion.IsImplicit ? "implicit" : "explicit";
                 var symbol = AddMember(conversion, SymbolKind.Operator, $"{keyword} operator {Text(conversion.Type)}", id, scope, conversion.Span.Start, nameText: keyword);
+                LinkExplicitInterface(symbol, conversion.ExplicitInterface, scope);
                 if (symbol != null)
                 {
                     symbol.Type = Text(conversion.Type);
@@ -256,28 +291,46 @@ public sealed class CSharpSymbolCollector
     private void VisitNamespace(NamespaceDeclaration ns, Scope scope)
     {
         var current = scope.Namespace;
+        var imports = scope.Imports;
         var parts = ns.Name.Parts;
         var nameStart = ns.Name.Span.Start;
         for (var i = 0; i < parts.Count; i++)
         {
             var dotted = current is null ? parts[i] : $"{current.Id[2..]}.{parts[i]}";
-            var symbol = _builder.GetOrAdd("N:" + dotted, SymbolKind.Namespace, parts[i], current, out var created);
-            if (created)
+            CodeSymbol symbol;
+            if (_pass == CollectPass.Types)
             {
-                symbol.Namespace = current?.Id[2..];
-                symbol.Signature = "namespace " + dotted;
-                symbol.Project = _source.Project;
+                symbol = _builder.GetOrAdd("N:" + dotted, SymbolKind.Namespace, parts[i], current, out var created);
+                if (created)
+                {
+                    symbol.Namespace = current?.Id[2..];
+                    symbol.Signature = "namespace " + dotted;
+                    symbol.Project = _source.Project;
+                }
+
+                // Each part of a dotted name declares its namespace in this file, as in Roslyn
+                var nameOffset = FindName(parts[i], nameStart, ns.Name.Span.End);
+                AddLocation(symbol, ns.Span, nameOffset);
+                nameStart = nameOffset + Encoding.UTF8.GetByteCount(parts[i]);
+            }
+            else
+            {
+                symbol = _builder.Get("N:" + dotted)!;
             }
 
-            // Each part of a dotted name declares its namespace in this file, as in Roslyn
-            var nameOffset = FindName(parts[i], nameStart, ns.Name.Span.End);
-            AddLocation(symbol, ns.Span, nameOffset);
-            nameStart = nameOffset + System.Text.Encoding.UTF8.GetByteCount(parts[i]);
-
+            // 'namespace A.B' is 'namespace A { namespace B' with the usings in B
+            imports = new ImportScope(imports, dotted);
             current = symbol;
         }
 
-        VisitMembers(ns.Members, new Scope(current, null, NoTypeParameters, 0));
+        imports.AddUsings(ns.Usings);
+        var inner = new Scope(current, null, NoTypeParameters, 0, imports);
+        if (_pass == CollectPass.References)
+        {
+            WalkUsings(ns.Usings, inner);
+        }
+
+        VisitMembers(ns.Members, inner);
     }
 
     private void VisitType(
@@ -292,15 +345,35 @@ public sealed class CSharpSymbolCollector
     {
         var arity = typeParameters?.Count ?? 0;
         var id = "T:" + scope.Qualify(arity == 0 ? name : $"{name}`{arity}");
+        if (_pass != CollectPass.Types)
+        {
+            var existing = _builder.Get(id)!;
+            var nestedScope = NestedScope(scope, existing, typeParameters);
+            if (_pass == CollectPass.References)
+            {
+                WalkType(type, nestedScope, existing);
+            }
+
+            VisitMembers(members, nestedScope);
+            return;
+        }
+
         var symbol = AddMember(type, kind, name, id, scope, FindName(name, AttributesEnd(type), type.Span.End));
         if (symbol == null)
         {
             return;
         }
 
-        if (symbol.BaseTypes.Count == 0 && baseTypes != null)
+        if (baseTypes != null)
         {
-            symbol.BaseTypes.AddRange(baseTypes.Select(Text));
+            foreach (var baseType in baseTypes)
+            {
+                var text = Text(baseType);
+                if (!symbol.BaseTypes.Contains(text))
+                {
+                    symbol.BaseTypes.Add(text);
+                }
+            }
         }
 
         if (symbol.TypeParameters.Count == 0 && typeParameters != null)
@@ -323,7 +396,13 @@ public sealed class CSharpSymbolCollector
         var bases = symbol.BaseTypes.Count != 0 ? " : " + string.Join(", ", symbol.BaseTypes) : "";
         symbol.Signature = $"{keyword} {symbol.QualifiedDisplayName()}{TypeParameterText(typeParameters)}{parameterList}{bases}";
 
-        VisitMembers(members, NestedScope(scope, symbol, typeParameters));
+        var inner = NestedScope(scope, symbol, typeParameters);
+        if (baseTypes != null)
+        {
+            _binder.AddBaseReferences(symbol, inner.Context, baseTypes.Select(b => (b, Text(b))));
+        }
+
+        VisitMembers(members, inner);
     }
 
     private static Scope NestedScope(Scope scope, CodeSymbol type, IReadOnlyList<TypeParameter>? typeParameters)
@@ -335,19 +414,32 @@ public sealed class CSharpSymbolCollector
             map[parameter.Name] = "`" + count++;
         }
 
-        return new Scope(scope.Namespace, type, map, count);
+        return new Scope(scope.Namespace, type, map, count, scope.Imports);
     }
 
     private void VisitEnum(EnumDeclaration e, Scope scope)
     {
-        var symbol = AddMember(e, SymbolKind.Enum, e.Name, "T:" + scope.Qualify(e.Name), scope, FindName(e.Name, AttributesEnd(e), e.Span.End));
-        if (symbol == null)
+        var enumId = "T:" + scope.Qualify(e.Name);
+        if (_pass == CollectPass.Types)
         {
+            var created = AddMember(e, SymbolKind.Enum, e.Name, enumId, scope, FindName(e.Name, AttributesEnd(e), e.Span.End));
+            created.Type = e.BaseType != null ? Text(e.BaseType) : null;
+            created.Signature = $"enum {created.QualifiedDisplayName()}{(created.Type != null ? " : " + created.Type : "")}";
             return;
         }
 
-        symbol.Type = e.BaseType != null ? Text(e.BaseType) : null;
-        symbol.Signature = $"enum {symbol.QualifiedDisplayName()}{(symbol.Type != null ? " : " + symbol.Type : "")}";
+        var symbol = _builder.Get(enumId)!;
+        if (_pass == CollectPass.References)
+        {
+            var inner = scope with { Type = symbol };
+            WalkType(e, inner, symbol);
+            foreach (var member in e.Members ?? [])
+            {
+                WalkNode(member, inner.Context, $"F:{symbol.Id[2..]}.{member.Name}");
+            }
+
+            return;
+        }
 
         foreach (var member in e.Members ?? [])
         {
@@ -372,11 +464,17 @@ public sealed class CSharpSymbolCollector
     {
         var arity = d.TypeParameters?.Count ?? 0;
         var id = "T:" + scope.Qualify(arity == 0 ? d.Name : $"{d.Name}`{arity}");
-        var symbol = AddMember(d, SymbolKind.Delegate, d.Name, id, scope, After(d.ReturnType, d));
-        if (symbol == null)
+        if (_pass != CollectPass.Types)
         {
+            if (_pass == CollectPass.References && _builder.Get(id) is { } existing)
+            {
+                WalkNode(d, NestedScope(scope, existing, d.TypeParameters).Context with { Type = scope.Type }, id);
+            }
+
             return;
         }
+
+        var symbol = AddMember(d, SymbolKind.Delegate, d.Name, id, scope, After(d.ReturnType, d));
 
         symbol.Type = Text(d.ReturnType);
         SetParameters(symbol, d.Parameters);
@@ -399,7 +497,13 @@ public sealed class CSharpSymbolCollector
             map[parameter.Name] = "`" + count++;
         }
 
-        VisitMembers(extension.Members, scope with { TypeParameters = map, TypeParameterCount = count, InExtension = true });
+        var inner = scope with { TypeParameters = map, TypeParameterCount = count, InExtension = true };
+        if (_pass == CollectPass.References)
+        {
+            WalkNode(extension.Receiver, inner.Context, scope.Type?.Id);
+        }
+
+        VisitMembers(extension.Members, inner);
     }
 
     private void VisitMethod(MethodDeclaration m, Scope scope)
@@ -411,9 +515,10 @@ public sealed class CSharpSymbolCollector
             map[m.TypeParameters![i].Name] = "``" + i;
         }
 
-        var name = DocumentationIds.MemberName(m.Name, m.ExplicitInterface, scope.TypeParameters, scope.ResolveType);
-        var id = $"M:{scope.Qualify(name)}{(arity > 0 ? "``" + arity : "")}{DocumentationIds.ParameterList(m.Parameters, map, scope.ResolveType)}";
+        var name = DocumentationIds.MemberName(m.Name, m.ExplicitInterface, scope.TypeParameters, Resolver(scope));
+        var id = $"M:{scope.Qualify(name)}{(arity > 0 ? "``" + arity : "")}{DocumentationIds.ParameterList(m.Parameters, map, Resolver(scope, map))}";
         var symbol = AddMember(m, SymbolKind.Method, m.Name, id, scope, After(m.ExplicitInterface ?? m.ReturnType, m));
+        LinkExplicitInterface(symbol, m.ExplicitInterface, scope);
         if (symbol == null)
         {
             return;
@@ -443,7 +548,7 @@ public sealed class CSharpSymbolCollector
     /// (<paramref name="nameText"/>, else <paramref name="name"/>) found from <paramref name="nameSearchStart"/>.
     /// Returns the symbol, whose details the caller fills in.
     /// </summary>
-    private CodeSymbol? AddMember(MemberDeclaration declaration, SymbolKind kind, string name, string id, Scope scope, int nameSearchStart, TextSpan? span = null, string? nameText = null)
+    private CodeSymbol AddMember(MemberDeclaration declaration, SymbolKind kind, string name, string id, Scope scope, int nameSearchStart, TextSpan? span = null, string? nameText = null)
     {
         var symbol = _builder.GetOrAdd(id, kind, name, scope.Container, out var created);
         if (created)
@@ -464,6 +569,16 @@ public sealed class CSharpSymbolCollector
         var nameOffset = FindName(nameText ?? TrimTilde(name), Math.Max(nameSearchStart, AttributesEnd(declaration)), declarationSpan.End);
         AddLocation(symbol, declarationSpan, nameOffset);
         return symbol;
+    }
+
+    /// <summary>Binds the interface of an explicit interface implementation, for matching it with the interface member.</summary>
+    private void LinkExplicitInterface(CodeSymbol symbol, TypeReference? explicitInterface, Scope scope)
+    {
+        if (explicitInterface is NamedTypeReference named && symbol.ExplicitInterface == null)
+        {
+            var bound = _binder.BindType(named, scope.Context);
+            symbol.ExplicitInterface = new TypeLink(Text(named), bound?.Symbol, bound?.Id ?? Text(named), bound?.OwnArguments ?? []);
+        }
     }
 
     private static string TrimTilde(string name) => name.StartsWith('~') ? name[1..] : name;

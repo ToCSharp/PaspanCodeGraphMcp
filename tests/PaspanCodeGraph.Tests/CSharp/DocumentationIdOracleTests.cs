@@ -8,48 +8,23 @@ namespace PaspanCodeGraph.Tests.CSharp;
 /// <summary>
 /// Checks the declaration ids and name locations of the index against Roslyn on real code: the PaspanParsers
 /// submodule, loaded through <see cref="WorkspaceLoader"/>. Ids are compared where they can be computed from
-/// syntax: namespaces, types, and members whose parameter types are predefined types, type parameters, or
-/// arrays, pointers, nullables and tuples of those.
+/// syntax and the workspace's own types: namespaces, types, and members whose parameter types are predefined
+/// types, type parameters, workspace types, or arrays, pointers, nullables and tuples of those.
 /// </summary>
 [TestClass]
 public sealed class DocumentationIdOracleTests
 {
-    private static WorkspaceSnapshot _snapshot;
-    private static List<(ProjectModel Project, CSharpCompilation Compilation)> _compilations;
-
-    [ClassInitialize]
-    public static void Load(TestContext context)
-    {
-        var solution = Path.Combine(TestPaths.RepositoryRoot, "external", "PaspanParsers", "PaspanParsers.slnx");
-        _snapshot = WorkspaceLoader.Load(solution);
-
-        var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
-            .Split(Path.PathSeparator)
-            .Where(p => Path.GetFileName(p).StartsWith("System.", StringComparison.Ordinal) || Path.GetFileName(p) == "netstandard.dll")
-            .Select(p => MetadataReference.CreateFromFile(p))
-            .ToList();
-
-        _compilations = [];
-        foreach (var project in _snapshot.Projects)
-        {
-            var options = new CSharpParseOptions(LanguageVersion.Preview, preprocessorSymbols: project.PreprocessorSymbols);
-            var trees = project.Sources
-                .Where(s => _snapshot.Documents.TryGetValue(s, out var d) && d.Project == project.Name)
-                .Select(s => CSharpSyntaxTree.ParseText(File.ReadAllText(s), options, s))
-                .ToList();
-            _compilations.Add((project, CSharpCompilation.Create(project.Name, trees, references, new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true))));
-        }
-    }
+    private static WorkspaceSnapshot Snapshot => RoslynOracle.Snapshot;
 
     [TestMethod]
     public void Workspace_LoadsAllProjectsAndParsesEveryFile()
     {
-        CollectionAssert.IsSubsetOf(new[] { "Paspan", "PaspanParsers", "PaspanParsers.Tests" }, _snapshot.Projects.Select(p => p.Name).ToArray());
-        var failed = _snapshot.Documents.Values.Where(d => d.Unit is null || d.Errors.Count != 0).Select(d => $"{d.Path}: {d.Failure ?? d.Errors[0].Message}").ToList();
+        CollectionAssert.IsSubsetOf(new[] { "Paspan", "PaspanParsers", "PaspanParsers.Tests" }, Snapshot.Projects.Select(p => p.Name).ToArray());
+        var failed = Snapshot.Documents.Values.Where(d => d.Unit is null || d.Errors.Count != 0).Select(d => $"{d.Path}: {d.Failure ?? d.Errors[0].Message}").ToList();
         Assert.AreEqual(0, failed.Count, string.Join("\n", failed.Take(10)));
 
         // The shared project's files come in through the .projitems import of Paspan.csproj
-        var paspan = _snapshot.Projects.Single(p => p.Name == "Paspan");
+        var paspan = Snapshot.Projects.Single(p => p.Name == "Paspan");
         Assert.IsTrue(paspan.Sources.Any(s => s.Contains(Path.Combine("PaspanCommon", ""), StringComparison.Ordinal)));
     }
 
@@ -58,7 +33,7 @@ public sealed class DocumentationIdOracleTests
     {
         var missing = new List<string>();
         var compared = 0;
-        foreach (var (symbol, file) in RoslynDeclarations())
+        foreach (var (symbol, file) in RoslynOracle.Declarations())
         {
             if (!IsComparable(symbol))
             {
@@ -67,24 +42,24 @@ public sealed class DocumentationIdOracleTests
 
             compared++;
             var id = symbol.GetDocumentationCommentId();
-            var ours = _snapshot.Index.Get(id);
+            var ours = Snapshot.Index.Get(id);
             if (ours is null || !ours.Declarations.Any(d => SymbolIndexBuilder.PathComparer.Equals(d.File, file)))
             {
                 missing.Add($"{id} ({Path.GetFileName(file)})");
             }
         }
 
-        Assert.IsTrue(compared > 3000, $"only {compared} symbols compared");
+        Assert.IsTrue(compared > 4500, $"only {compared} symbols compared");
         Assert.AreEqual(0, missing.Count, $"{missing.Count} of {compared} Roslyn ids are missing from the index:\n" + string.Join("\n", missing.Distinct().Take(30)));
     }
 
     [TestMethod]
     public void TypeIds_ExistInRoslyn()
     {
-        var roslyn = RoslynDeclarations()
+        var roslyn = RoslynOracle.Declarations()
             .Select(d => d.Symbol.GetDocumentationCommentId())
             .ToHashSet(StringComparer.Ordinal);
-        var extra = _snapshot.Index.Symbols
+        var extra = Snapshot.Index.Symbols
             .Where(s => s.Kind.IsType() || s.Kind == SymbolKind.Namespace)
             .Where(s => !roslyn.Contains(s.Id))
             .Select(s => s.Id)
@@ -97,14 +72,14 @@ public sealed class DocumentationIdOracleTests
     public void NameLocations_MatchRoslyn()
     {
         var wrong = new List<string>();
-        foreach (var (symbol, file) in RoslynDeclarations())
+        foreach (var (symbol, file) in RoslynOracle.Declarations())
         {
             if (!IsComparable(symbol) || symbol is IMethodSymbol { MethodKind: MethodKind.UserDefinedOperator or MethodKind.Conversion })
             {
                 continue;
             }
 
-            var ours = _snapshot.Index.Get(symbol.GetDocumentationCommentId());
+            var ours = Snapshot.Index.Get(symbol.GetDocumentationCommentId());
             if (ours is null)
             {
                 continue;
@@ -124,46 +99,6 @@ public sealed class DocumentationIdOracleTests
         Assert.AreEqual(0, wrong.Count, $"{wrong.Count} name locations differ:\n" + string.Join("\n", wrong.Take(30)));
     }
 
-    /// <summary>Every symbol declared in the sources, with the file of the declaration.</summary>
-    private static IEnumerable<(ISymbol Symbol, string File)> RoslynDeclarations()
-    {
-        foreach (var (_, compilation) in _compilations)
-        {
-            foreach (var tree in compilation.SyntaxTrees)
-            {
-                var model = compilation.GetSemanticModel(tree);
-                foreach (var node in tree.GetRoot().DescendantNodes(n => n is not (BlockSyntax or ArrowExpressionClauseSyntax or EqualsValueClauseSyntax)))
-                {
-                    var declared = node switch
-                    {
-                        BaseNamespaceDeclarationSyntax or BaseTypeDeclarationSyntax or DelegateDeclarationSyntax or EnumMemberDeclarationSyntax
-                            or BaseMethodDeclarationSyntax or BasePropertyDeclarationSyntax => model.GetDeclaredSymbol(node),
-                        VariableDeclaratorSyntax { Parent.Parent: BaseFieldDeclarationSyntax } => model.GetDeclaredSymbol(node),
-                        _ => null,
-                    };
-
-                    if (declared is null)
-                    {
-                        continue;
-                    }
-
-                    // Each part of a dotted namespace name is a namespace
-                    if (declared is INamespaceSymbol ns)
-                    {
-                        for (var n = ns; n is { IsGlobalNamespace: false }; n = n.ContainingNamespace)
-                        {
-                            yield return (n, tree.FilePath);
-                        }
-
-                        continue;
-                    }
-
-                    yield return (declared, tree.FilePath);
-                }
-            }
-        }
-    }
-
     /// <summary>Whether the id of the symbol can be computed from syntax alone.</summary>
     private static bool IsComparable(ISymbol symbol)
     {
@@ -174,9 +109,9 @@ public sealed class DocumentationIdOracleTests
 
         var parameters = symbol switch
         {
-            IMethodSymbol m when m.ExplicitInterfaceImplementations.IsEmpty => m.Parameters,
-            IPropertySymbol p when p.ExplicitInterfaceImplementations.IsEmpty => p.Parameters,
-            IEventSymbol e when e.ExplicitInterfaceImplementations.IsEmpty => [],
+            IMethodSymbol m when m.ExplicitInterfaceImplementations.All(i => RoslynOracle.IsExact(i.ContainingType)) => m.Parameters,
+            IPropertySymbol p when p.ExplicitInterfaceImplementations.All(i => RoslynOracle.IsExact(i.ContainingType)) => p.Parameters,
+            IEventSymbol e when e.ExplicitInterfaceImplementations.All(i => RoslynOracle.IsExact(i.ContainingType)) => [],
             IFieldSymbol => [],
             _ => default(System.Collections.Immutable.ImmutableArray<IParameterSymbol>?),
         };
@@ -186,22 +121,11 @@ public sealed class DocumentationIdOracleTests
             return false;
         }
 
-        if (symbol is IMethodSymbol { MethodKind: MethodKind.Conversion } conversion && !IsExact(conversion.ReturnType))
+        if (symbol is IMethodSymbol { MethodKind: MethodKind.Conversion } conversion && !RoslynOracle.IsExact(conversion.ReturnType))
         {
             return false;
         }
 
-        return parameters.Value.All(p => IsExact(p.Type));
+        return parameters.Value.All(p => RoslynOracle.IsExact(p.Type));
     }
-
-    private static bool IsExact(ITypeSymbol type) => type switch
-    {
-        ITypeParameterSymbol => true,
-        IArrayTypeSymbol array => IsExact(array.ElementType),
-        IPointerTypeSymbol pointer => IsExact(pointer.PointedAtType),
-        { TypeKind: TypeKind.Dynamic } => true,
-        INamedTypeSymbol { IsTupleType: true } tuple => tuple.TupleElements.All(e => IsExact(e.Type)),
-        INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable => nullable.TypeArguments[0].SpecialType != SpecialType.None,
-        _ => type.SpecialType != SpecialType.None && type.SpecialType != SpecialType.System_Nullable_T,
-    };
 }

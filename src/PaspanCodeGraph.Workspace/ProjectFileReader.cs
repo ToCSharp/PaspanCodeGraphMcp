@@ -18,6 +18,9 @@ public sealed record ProjectModel(
     IReadOnlyList<string> ProjectReferences,
     IReadOnlyList<LoadProblem> Problems)
 {
+    /// <summary>Namespaces imported in every file: the SDK's implicit usings and <c>&lt;Using&gt;</c> items.</summary>
+    public IReadOnlyList<string> Usings { get; init; } = [];
+
     public string Directory => System.IO.Path.GetDirectoryName(Path)!;
 }
 
@@ -35,6 +38,9 @@ public sealed partial class ProjectFileReader
     private readonly List<string> _compile = [];
     private readonly HashSet<string> _compileSet = new(SymbolIndexBuilder.PathComparer);
     private readonly List<string> _references = [];
+    private readonly List<string> _usings = [];
+    private readonly List<string> _removedUsings = [];
+    private string _sdk = "";
     private readonly List<LoadProblem> _problems = [];
     private readonly HashSet<string> _imported = new(SymbolIndexBuilder.PathComparer);
     private readonly string _projectPath;
@@ -64,6 +70,7 @@ public sealed partial class ProjectFileReader
         var document = XDocument.Load(_projectPath);
         var root = document.Root ?? throw new InvalidDataException($"Empty project file: {_projectPath}");
         var isSdk = root.Attribute("Sdk") != null || root.Elements().Any(e => e.Name.LocalName == "Sdk");
+        _sdk = (string?)root.Attribute("Sdk") ?? (string?)root.Elements().FirstOrDefault(e => e.Name.LocalName == "Sdk")?.Attribute("Name") ?? "";
         var directory = Path.GetDirectoryName(_projectPath)!;
 
         if (isSdk)
@@ -108,7 +115,10 @@ public sealed partial class ProjectFileReader
             PreprocessorSymbols(isSdk, targetFramework),
             _compile,
             _references,
-            _problems);
+            _problems)
+        {
+            Usings = Usings(isSdk),
+        };
     }
 
     private void SetDefault(string name, string value)
@@ -253,6 +263,19 @@ public sealed partial class ProjectFileReader
 
                 break;
 
+            case "Using" when (string?)item.Attribute("Alias") == null && (string?)item.Attribute("Static") is null or "false":
+                foreach (var ns in Split(include))
+                {
+                    _usings.Add(ns);
+                }
+
+                foreach (var ns in Split(remove))
+                {
+                    _removedUsings.Add(ns);
+                }
+
+                break;
+
             case "ProjectReference":
                 foreach (var path in Split(include))
                 {
@@ -329,6 +352,28 @@ public sealed partial class ProjectFileReader
                 pending.Push(subdirectory);
             }
         }
+    }
+
+    /// <summary>The implicit usings of the SDK (when <c>ImplicitUsings</c> is on) and the <c>Using</c> items.</summary>
+    private List<string> Usings(bool isSdk)
+    {
+        var usings = new List<string>();
+        var implicitUsings = Expand("$(ImplicitUsings)");
+        if (isSdk && (implicitUsings.Equals("enable", StringComparison.OrdinalIgnoreCase) || implicitUsings.Equals("true", StringComparison.OrdinalIgnoreCase)))
+        {
+            usings.AddRange(["System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Net.Http", "System.Threading", "System.Threading.Tasks"]);
+            if (_sdk.StartsWith("Microsoft.NET.Sdk.Web", StringComparison.OrdinalIgnoreCase))
+            {
+                usings.AddRange(["System.Net.Http.Json", "Microsoft.AspNetCore.Builder", "Microsoft.AspNetCore.Hosting", "Microsoft.AspNetCore.Http", "Microsoft.AspNetCore.Routing", "Microsoft.Extensions.Configuration", "Microsoft.Extensions.DependencyInjection", "Microsoft.Extensions.Hosting", "Microsoft.Extensions.Logging"]);
+            }
+            else if (_sdk.StartsWith("Microsoft.NET.Sdk.Worker", StringComparison.OrdinalIgnoreCase))
+            {
+                usings.AddRange(["Microsoft.Extensions.Configuration", "Microsoft.Extensions.DependencyInjection", "Microsoft.Extensions.Hosting", "Microsoft.Extensions.Logging"]);
+            }
+        }
+
+        usings.AddRange(_usings);
+        return usings.Where(u => !_removedUsings.Contains(u)).Distinct(StringComparer.Ordinal).ToList();
     }
 
     // ========================================

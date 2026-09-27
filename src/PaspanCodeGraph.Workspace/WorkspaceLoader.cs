@@ -129,11 +129,46 @@ public static class WorkspaceLoader
             file => documents[file.Key] = ParseFile(file.Key, file.Value.Name, options[file.Value]));
 
         var builder = new SymbolIndexBuilder();
-        foreach (var document in documents.Values.OrderBy(d => d.Path, StringComparer.Ordinal))
+        var binder = new CSharpBinder(builder);
+        foreach (var project in projects)
         {
-            if (document.Unit is { } unit)
+            var scope = binder.ProjectScope(project.Name);
+            foreach (var ns in project.Usings)
             {
-                CSharpSymbolCollector.Collect(new CSharpSource(document.Path, document.Project, document.Utf8, document.Lines, unit), builder);
+                scope.AddNamespace(ns);
+            }
+        }
+
+        var sources = documents.Values
+            .Where(d => d.Unit != null)
+            .OrderBy(d => d.Path, StringComparer.Ordinal)
+            .Select(d => new CSharpSource(d.Path, d.Project, d.Utf8, d.Lines, d.Unit!))
+            .ToList();
+
+        // Every type first, so that names in member signatures and base lists bind to types of any file
+        foreach (var source in sources)
+        {
+            CSharpSymbolCollector.Collect(source, builder, binder, CollectPass.Types);
+        }
+
+        foreach (var source in sources)
+        {
+            CSharpSymbolCollector.Collect(source, builder, binder, CollectPass.Members);
+        }
+
+        CSharpHierarchy.Link(builder, binder);
+
+        var references = new List<(string TargetId, SymbolReference Reference)>[sources.Count];
+        Parallel.For(
+            0,
+            sources.Count,
+            new ParallelOptions { CancellationToken = cancellationToken },
+            i => references[i] = CSharpSymbolCollector.Collect(sources[i], builder, binder, CollectPass.References));
+        foreach (var list in references)
+        {
+            foreach (var (target, reference) in list)
+            {
+                builder.AddReference(target, reference);
             }
         }
 

@@ -10,6 +10,7 @@ public sealed class SymbolIndexBuilder
 {
     private readonly Dictionary<string, CodeSymbol> _byId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> _byFile = new(PathComparer);
+    private readonly Dictionary<string, List<SymbolReference>> _references = new(StringComparer.Ordinal);
 
     public static StringComparer PathComparer { get; } = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
@@ -32,6 +33,21 @@ public sealed class SymbolIndexBuilder
         return symbol;
     }
 
+    public CodeSymbol? Get(string id) => _byId.GetValueOrDefault(id);
+
+    public IEnumerable<CodeSymbol> Symbols => _byId.Values;
+
+    /// <summary>Records a reference to the symbol with <paramref name="id"/>.</summary>
+    public void AddReference(string id, SymbolReference reference)
+    {
+        if (!_references.TryGetValue(id, out var list))
+        {
+            _references[id] = list = [];
+        }
+
+        list.Add(reference);
+    }
+
     /// <summary>Records a declaration of <paramref name="symbol"/>.</summary>
     public void AddDeclaration(CodeSymbol symbol, SourceLocation location)
     {
@@ -44,7 +60,7 @@ public sealed class SymbolIndexBuilder
         list.Add((symbol, location));
     }
 
-    public SymbolIndex Build() => new(_byId, _byFile);
+    public SymbolIndex Build() => new(_byId, _byFile, _references);
 }
 
 /// <summary>The declared symbols of a workspace, by id, by file and by name.</summary>
@@ -52,11 +68,21 @@ public sealed class SymbolIndex
 {
     private readonly Dictionary<string, CodeSymbol> _byId;
     private readonly Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> _byFile;
+    private readonly Dictionary<string, List<SymbolReference>> _references;
 
-    internal SymbolIndex(Dictionary<string, CodeSymbol> byId, Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> byFile)
+    internal SymbolIndex(
+        Dictionary<string, CodeSymbol> byId,
+        Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> byFile,
+        Dictionary<string, List<SymbolReference>> references)
     {
         _byId = byId;
         _byFile = byFile;
+        _references = references;
+        foreach (var list in _references.Values)
+        {
+            list.Sort((a, b) => a.File == b.File ? a.Start.CompareTo(b.Start) : string.CompareOrdinal(a.File, b.File));
+        }
+
         foreach (var list in _byFile.Values)
         {
             list.Sort((a, b) => a.Location.Start.CompareTo(b.Location.Start));
@@ -70,6 +96,12 @@ public sealed class SymbolIndex
     public IEnumerable<CodeSymbol> Symbols => _byId.Values;
 
     public CodeSymbol? Get(string id) => _byId.GetValueOrDefault(id);
+
+    /// <summary>The references to the symbol with <paramref name="id"/>, by file and position.</summary>
+    public IReadOnlyList<SymbolReference> ReferencesTo(string id) => _references.TryGetValue(id, out var list) ? list : [];
+
+    /// <summary>The number of references recorded.</summary>
+    public int ReferenceCount => _references.Values.Sum(l => l.Count);
 
     /// <summary>The declarations in <paramref name="file"/> (a full path), in source order.</summary>
     public IReadOnlyList<(CodeSymbol Symbol, SourceLocation Location)> InFile(string file) =>
