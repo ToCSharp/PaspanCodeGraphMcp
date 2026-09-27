@@ -2329,7 +2329,7 @@ public sealed partial class CSharpSymbolCollector
     {
         if (inMember != null)
         {
-            RecordReference(ExternalPrefix + id, offset, inMember, Confidence.Inferred);
+            RecordReference(ReferenceTargets.External + id, offset, inMember, Confidence.Inferred);
         }
     }
 
@@ -2347,14 +2347,14 @@ public sealed partial class CSharpSymbolCollector
 
         if (inMember != null && candidates.Count == 0)
         {
-            RecordReference(UnresolvedPrefix + name, offset, inMember, Confidence.NameOnly);
+            RecordReference(ReferenceTargets.Unresolved + name, offset, inMember, Confidence.NameOnly);
         }
     }
 
     private bool Accepts(CodeSymbol method, int argumentCount)
     {
         var parameters = _binder.Parameters(method);
-        var offset = method.Modifiers.Contains("extension") ? 1 : 0;
+        var offset = _binder.IsExtensionMethod(method) ? 1 : 0;
         var required = parameters.Skip(offset).Count(p => !p.HasDefault && !p.IsParams);
         var total = parameters.Count - offset;
         return argumentCount >= required && (argumentCount <= total || parameters.Count > 0 && parameters[^1].IsParams);
@@ -2362,9 +2362,4 @@ public sealed partial class CSharpSymbolCollector
 
     private const int MaxNameOnlyCandidates = 20;
 
-    /// <summary>Target ids of references to members of types from references: <c>external:M:System.String.Trim</c>.</summary>
-    public const string ExternalPrefix = "external:";
-
-    /// <summary>Target ids of calls that could not be bound: <c>unresolved:Name</c>.</summary>
-    public const string UnresolvedPrefix = "unresolved:";
 }

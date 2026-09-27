@@ -43,7 +43,8 @@ builder.Services
     }))
     .WithTools<WorkspaceTools>()
     .WithTools<NavigationTools>()
-    .WithTools<HierarchyTools>();
+    .WithTools<HierarchyTools>()
+    .WithTools<CallGraphTools>();
 
 await builder.Build().RunAsync();
 

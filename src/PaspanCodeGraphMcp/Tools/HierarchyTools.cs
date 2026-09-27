@@ -25,12 +25,14 @@ public sealed record RelatedSymbolDto(string Relation, SymbolDto Symbol);
 public sealed record FindImplementationsResult(SymbolDto Symbol, int Count, IReadOnlyList<RelatedSymbolDto> Items, bool Truncated);
 
 /// <param name="InMember">The id of the declaration the reference is in.</param>
-/// <param name="Confidence">Exact where only a type can be written (signatures, base lists, 'new T()'); Inferred for names in expressions, which a local of the same name would hide.</param>
-public sealed record ReferenceDto(int Line, int Column, string? LineText, string? InMember, string Confidence);
+/// <param name="Confidence">Exact when bound by the language's rules with every type known; Inferred when a type was inferred or a local of the same name could hide a type; NameOnly when only the name matches.</param>
+/// <param name="Target">The id of the member referenced, when it is an override, implementation or base of the one asked for.</param>
+public sealed record ReferenceDto(int Line, int Column, string? LineText, string? InMember, string Confidence, string? Target = null);
 
 public sealed record FileReferences(string File, bool IsTest, int Count, IReadOnlyList<ReferenceDto> Items);
 
-public sealed record FindReferencesResult(SymbolDto Symbol, int Total, int Offset, int Returned, bool Truncated, IReadOnlyList<FileReferences> Files);
+/// <param name="NameOnly">References bound only by name (receiver of unknown type); listed with includeNameOnly=true.</param>
+public sealed record FindReferencesResult(SymbolDto Symbol, int Total, int Offset, int Returned, bool Truncated, IReadOnlyList<FileReferences> Files, int NameOnly);
 
 [McpServerToolType]
 public sealed class HierarchyTools
@@ -204,12 +206,14 @@ public sealed class HierarchyTools
     }
 
     [McpServerTool(Name = "find_references", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Find references")]
-    [Description("References to a type across the workspace, grouped by file: in signatures, base lists, attributes, usings, generic arguments, 'new', casts, typeof, patterns and static member access. Names in expressions are Inferred (a local variable of the same name would hide the type). Only types for now; members come later.")]
+    [Description("References to a type or member across the workspace, grouped by file, each with the member it is in. Types: in signatures, base lists, attributes, usings, generic arguments, 'new', casts, typeof, patterns and static member access. Members: calls (overloads and extension methods resolved), property, field and event accesses, object initializers, indexers ('[' of the access), constructor calls ('new', ': base(...)', attributes) and method groups. Exact when every type involved is known, Inferred when a type was inferred or a same-named local could hide a type. For a virtual or interface member, references to its overrides, implementations and the members it overrides or implements are included (includeImplementations=false restricts to the member itself). References on receivers of unknown type, bound only by name, are counted in nameOnly and listed with includeNameOnly=true.")]
     public static async Task<object> FindReferences(
         WorkspaceHost host,
-        [Description("Type id (T:...), 'file.cs:line:col', or a (dotted) type name")] string symbol,
+        [Description("Type or member id, 'file.cs:line:col', or a (dotted) name")] string symbol,
         [Description("Maximum references (default 200)")] int maxResults = 200,
         [Description("References to skip, for paging (default 0)")] int offset = 0,
+        [Description("For a virtual or interface member, also the references to the members it is related to by overriding or implementing (default true)")] bool includeImplementations = true,
+        [Description("Also list the references bound only by name (default false)")] bool includeNameOnly = false,
         CancellationToken ct = default)
     {
         var snapshot = await host.RequireSnapshotAsync(ct);
@@ -219,22 +223,62 @@ public sealed class HierarchyTools
             return ambiguous!;
         }
 
-        if (!resolved.Kind.IsType())
+        var targets = new List<CodeSymbol> { resolved };
+        if (includeImplementations && !resolved.Kind.IsType())
         {
-            throw new ArgumentException($"find_references supports types for now; '{resolved.Signature}' is a {resolved.Kind}.");
+            // The whole family: what this member overrides or implements, and what overrides or implements any of those
+            foreach (var related in CallGraphTools.CalledAs(resolved))
+            {
+                foreach (var member in CallGraphTools.Implementations(related).Prepend(related))
+                {
+                    if (!targets.Contains(member))
+                    {
+                        targets.Add(member);
+                    }
+                }
+            }
         }
 
-        var all = snapshot.Index.ReferencesTo(resolved.Id);
+        var nameOnly = 0;
+        var all = new List<(SymbolReference Reference, CodeSymbol Target)>();
+        foreach (var target in targets)
+        {
+            foreach (var reference in snapshot.Index.ReferencesTo(target.Id))
+            {
+                if (reference.Confidence == Confidence.NameOnly)
+                {
+                    nameOnly++;
+                    if (!includeNameOnly)
+                    {
+                        continue;
+                    }
+                }
+
+                all.Add((reference, target));
+            }
+        }
+
+        all.Sort((a, b) =>
+        {
+            var byFile = SymbolIndexBuilder.PathComparer.Compare(a.Reference.File, b.Reference.File);
+            return byFile != 0 ? byFile : a.Reference.Start.CompareTo(b.Reference.Start);
+        });
         var page = all.Skip(Math.Max(0, offset)).Take(Math.Max(0, maxResults)).ToList();
         var files = page
-            .GroupBy(r => r.File, SymbolIndexBuilder.PathComparer)
+            .GroupBy(r => r.Reference.File, SymbolIndexBuilder.PathComparer)
             .Select(g =>
             {
-                var items = g.Select(r => new ReferenceDto(r.Line, r.Column, LineText(snapshot, r), r.InMember, r.Confidence.ToString())).ToList();
+                var items = g.Select(r => new ReferenceDto(
+                    r.Reference.Line,
+                    r.Reference.Column,
+                    LineText(snapshot, r.Reference),
+                    r.Reference.InMember,
+                    r.Reference.Confidence.ToString(),
+                    r.Target == resolved ? null : r.Target.Id)).ToList();
                 return new FileReferences(g.Key, SymbolFormatter.IsTestPath(g.Key), items.Count, items);
             })
             .ToList();
-        return new FindReferencesResult(SymbolFormatter.ToDto(resolved, snapshot), all.Count, offset, page.Count, offset + page.Count < all.Count, files);
+        return new FindReferencesResult(SymbolFormatter.ToDto(resolved, snapshot), all.Count, offset, page.Count, offset + page.Count < all.Count, files, nameOnly);
     }
 
     /// <summary>Whether the base at <paramref name="index"/> is the base class (only the first one can be, and only of a class or record).</summary>

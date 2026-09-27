@@ -71,6 +71,16 @@ public enum Confidence
 /// <param name="InMember">Id of the declaration the reference is in (a member, or a type for its base list and attributes).</param>
 public sealed record SymbolReference(string File, int Start, int Line, int Column, string? InMember, Confidence Confidence);
 
+/// <summary>Prefixes of reference targets that are not workspace symbols.</summary>
+public static class ReferenceTargets
+{
+    /// <summary>A member of a type from a referenced assembly, by the id it would have: <c>external:M:System.String.Trim</c>.</summary>
+    public const string External = "external:";
+
+    /// <summary>A call that could not be bound, by its name: <c>unresolved:Name</c>.</summary>
+    public const string Unresolved = "unresolved:";
+}
+
 /// <summary>A base type or interface of a type as written, and the workspace type it names when it was found.</summary>
 /// <param name="Id">Id form of the type (<c>Ns.Base{System.Int32}</c>), written as in source when it was not found.</param>
 /// <param name="TypeArguments">Id forms of the type arguments of the last part, for mapping type parameters.</param>

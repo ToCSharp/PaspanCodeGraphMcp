@@ -243,8 +243,8 @@ internal static class HierarchyComparison
             foreach (var tree in Trees(compilation))
             {
                 var model = compilation.GetSemanticModel(tree);
-                void Add(ISymbol? symbol, SyntaxToken token) => AddAt(symbol, token.GetLocation());
-                void AddAt(ISymbol? symbol, Location location)
+                void Add(ISymbol symbol, SyntaxToken token) => AddAt(symbol, token.GetLocation());
+                void AddAt(ISymbol symbol, Location location)
                 {
                     if (Normalize(symbol) is { } member)
                     {
@@ -340,7 +340,7 @@ internal static class HierarchyComparison
     };
 
     /// <summary>A workspace member as the index records it: the definition, and an extension method's declaration.</summary>
-    private static ISymbol? Normalize(ISymbol? symbol)
+    private static ISymbol Normalize(ISymbol symbol)
     {
         var member = symbol switch
         {

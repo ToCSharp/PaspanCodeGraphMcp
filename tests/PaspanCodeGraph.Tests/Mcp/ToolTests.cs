@@ -28,7 +28,7 @@ public sealed class ToolTests
         var report = await WorkspaceTools.Load(_host, _workspace.PathOf("Sample.slnx"));
 
         CollectionAssert.AreEquivalent(new[] { "App", "Lib" }, report.Projects.Select(p => p.Name).ToArray());
-        Assert.AreEqual(5, report.Documents);
+        Assert.AreEqual(6, report.Documents);
         Assert.AreEqual(1, report.FilesWithParseErrors);
         CollectionAssert.Contains(report.Projects.Single(p => p.Name == "App").ProjectReferences.ToArray(), "Lib");
 
@@ -46,6 +46,10 @@ public sealed class ToolTests
         StringAssert.EndsWith(error.File, "Broken.cs");
         Assert.AreEqual(5, error.Line);
         Assert.AreEqual("Lib", error.Project);
+
+        Assert.IsTrue(result.Binding.Exact > 0);
+        Assert.IsTrue(result.Binding.NameOnly > 0 && result.Binding.NameOnlyShare is > 0 and < 1, "value.Next() on a dynamic receiver");
+        Assert.AreEqual(1, result.Binding.Unresolved, "Missing(1)");
     }
 
     [TestMethod]
@@ -177,7 +181,7 @@ public sealed class ToolTests
 
         var parser = (SymbolInfoResult)await NavigationTools.SymbolInfo(_host, "T:Lib.Parser");
         Assert.AreEqual(1, parser.Relations.DerivedTypes);
-        Assert.AreEqual(1, parser.Relations.References);
+        Assert.AreEqual(2, parser.Relations.References);
     }
 
     [TestMethod]
@@ -227,8 +231,72 @@ public sealed class ToolTests
         var page = (FindReferencesResult)await HierarchyTools.FindReferences(_host, "T:Lib.Tokenizer", maxResults: 1, offset: 1);
         Assert.AreEqual(1, page.Returned);
         Assert.IsFalse(page.Truncated);
+    }
 
-        await Assert.ThrowsExactlyAsync<ArgumentException>(() => HierarchyTools.FindReferences(_host, "M:Lib.Tokenizer.Next"));
+    [TestMethod]
+    public async Task FindReferences_OfMember_WithImplementations()
+    {
+        var own = (FindReferencesResult)await HierarchyTools.FindReferences(_host, "M:Lib.ITokenizer.Next", includeImplementations: false);
+        var call = own.Files.Single().Items.Single();
+        Assert.AreEqual("M:App.Runner.Run(Lib.ITokenizer,Lib.WordTokenizer,System.String)", call.InMember);
+        Assert.AreEqual("Exact", call.Confidence);
+        Assert.AreEqual(1, own.NameOnly, "value.Next() on a dynamic receiver");
+
+        var family = (FindReferencesResult)await HierarchyTools.FindReferences(_host, "M:Lib.ITokenizer.Next");
+        var targets = family.Files.SelectMany(f => f.Items).Select(i => i.Target).ToList();
+        CollectionAssert.Contains(targets, null);
+        CollectionAssert.Contains(targets, "M:Lib.WordTokenizer.Next");
+    }
+
+    [TestMethod]
+    public async Task FindCallers_DirectAndThroughInterface()
+    {
+        var parse = (FindCallersResult)await CallGraphTools.FindCallers(_host, "M:Lib.Parser.Parse(System.String)");
+        var site = parse.CallSites.Single();
+        Assert.AreEqual("M:App.Runner.Run(Lib.ITokenizer,Lib.WordTokenizer,System.String)", site.Caller!.Id);
+        Assert.IsTrue(site.IsDirect);
+        Assert.AreEqual("Exact", site.Confidence);
+
+        var overload = (FindCallersResult)await CallGraphTools.FindCallers(_host, "M:Lib.Parser.Parse(System.String,System.Int32)");
+        Assert.AreEqual("M:Lib.Parser.Parse(System.String)", overload.CallSites.Single().Caller!.Id);
+
+        var next = (FindCallersResult)await CallGraphTools.FindCallers(_host, "M:Lib.WordTokenizer.Next");
+        Assert.IsTrue(next.CallSites.Any(c => c.IsDirect && c.Location.LineText!.Contains("word.Next()")));
+        Assert.IsTrue(next.CallSites.Any(c => !c.IsDirect && c.Via == "M:Lib.ITokenizer.Next"));
+        Assert.IsTrue(next.NameOnlyCallSites >= 1);
+        Assert.IsFalse(next.CallSites.Any(c => c.Confidence == "NameOnly"));
+
+        var withNameOnly = (FindCallersResult)await CallGraphTools.FindCallers(_host, "M:Lib.WordTokenizer.Next", includeNameOnly: true);
+        Assert.IsTrue(withNameOnly.CallSites.Any(c => c.Confidence == "NameOnly" && c.Caller!.Name == "Loose"));
+
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => CallGraphTools.FindCallers(_host, "T:Lib.Parser"));
+    }
+
+    [TestMethod]
+    public async Task FindCallees_OfMethod()
+    {
+        var result = (FindCalleesResult)await CallGraphTools.FindCallees(_host, "M:App.Runner.Run(Lib.ITokenizer,Lib.WordTokenizer,System.String)");
+        var parse = result.Callees.Single(c => c.Id == "M:Lib.Parser.Parse(System.String)");
+        Assert.AreEqual("Exact", parse.Confidence);
+        Assert.IsNull(parse.Implementations);
+
+        var face = result.Callees.Single(c => c.Id == "M:Lib.ITokenizer.Next");
+        Assert.IsTrue(face.IsInterfaceMember);
+        Assert.AreEqual(4, face.Implementations, "Tokenizer.Next, its two overrides and the explicit implementation");
+
+        var word = result.Callees.Single(c => c.Id == "M:Lib.WordTokenizer.Next");
+        Assert.IsTrue(word.IsOverride);
+
+        CollectionAssert.IsSubsetOf(new[] { "M:System.String.Trim", "P:System.String.Length" }, result.Callees.Where(c => c.Symbol == null).Select(c => c.Id).ToArray());
+        Assert.AreEqual(3, result.Internal);
+        CollectionAssert.AreEqual(new[] { "Missing" }, result.Unresolved.ToArray());
+
+        var internalOnly = (FindCalleesResult)await CallGraphTools.FindCallees(_host, "M:App.Runner.Run(Lib.ITokenizer,Lib.WordTokenizer,System.String)", includeExternal: false);
+        Assert.IsTrue(internalOnly.Callees.All(c => c.Symbol != null));
+
+        var loose = (FindCalleesResult)await CallGraphTools.FindCallees(_host, "Runner.Loose");
+        Assert.AreEqual(0, loose.Callees.Count);
+        Assert.IsTrue(loose.NameOnly >= 3);
     }
 
     [TestMethod]
@@ -318,6 +386,23 @@ internal static class SampleWorkspace
                 int ITokenizer.Next() => 3;
 
                 public static Tokenizer Create() => new WordTokenizer();
+            }
+            """);
+        workspace.Write("App/Runner.cs", """
+            using Lib;
+
+            namespace App;
+
+            public static class Runner
+            {
+                public static int Run(ITokenizer tokenizer, WordTokenizer word, string text)
+                {
+                    var total = Parser.Parse(text) + tokenizer.Next() + word.Next();
+                    total += text.Trim().Length;
+                    return total + Missing(1);
+                }
+
+                public static int Loose(dynamic value) => value.Next();
             }
             """);
         workspace.Write("Lib/Tokens.cs", """

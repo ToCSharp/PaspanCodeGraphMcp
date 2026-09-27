@@ -41,6 +41,10 @@ public sealed partial class CSharpBinder
         }
     }
 
+    /// <summary>Whether a method is an extension method (its first parameter is <c>this</c>).</summary>
+    public bool IsExtensionMethod(CodeSymbol method) =>
+        _memberSyntax.TryGetValue(method, out var syntax) && syntax.Parameters is { Count: > 0 } parameters && parameters[0].Modifiers.Contains(ParameterModifier.This);
+
     /// <summary>Remembers the type parameter constraints of one declaration of a type.</summary>
     public void RegisterTypeConstraints(CodeSymbol type, BindingContext context, IReadOnlyList<TypeParameterConstraint>? constraints)
     {

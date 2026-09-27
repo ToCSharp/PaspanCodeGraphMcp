@@ -48,7 +48,13 @@ public sealed record WorkspaceStatus(
 
 public sealed record DiagnosticDto(string Severity, string Kind, string Message, string? File, int Line, int Column, string? Project);
 
-public sealed record DiagnosticsResult(int Total, IReadOnlyDictionary<string, int> ByProject, IReadOnlyList<DiagnosticDto> Items, bool Truncated);
+/// <summary>How the references to workspace members were bound, for the whole workspace.</summary>
+/// <param name="NameOnlyShare">The share of name-only references among exact, inferred and name-only ones: how much of the call graph rests on names alone.</param>
+/// <param name="External">References to members of types from referenced assemblies.</param>
+/// <param name="Unresolved">Calls that could not be bound at all.</param>
+public sealed record BindingSummary(int Exact, int Inferred, int NameOnly, double NameOnlyShare, int External, int Unresolved);
+
+public sealed record DiagnosticsResult(int Total, IReadOnlyDictionary<string, int> ByProject, IReadOnlyList<DiagnosticDto> Items, bool Truncated, BindingSummary Binding);
 
 [McpServerToolType]
 public sealed class WorkspaceTools
@@ -111,7 +117,7 @@ public sealed class WorkspaceTools
     }
 
     [McpServerTool(Name = "diagnostics", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Load and parse problems")]
-    [Description("Problems of the loaded workspace: projects that could not be read and syntax errors found by the parser (there is no semantic analysis, so no type errors). Grouped counts plus the first N items.")]
+    [Description("Problems of the loaded workspace: projects that could not be read and syntax errors found by the parser (there is no semantic analysis, so no type errors). Grouped counts plus the first N items, and how the member references of the whole workspace were bound (exact, inferred, name-only and their share, external, unresolved).")]
     public static async Task<DiagnosticsResult> Diagnostics(
         WorkspaceHost host,
         [Description("Project name filter (exact, case-insensitive)")] string? project = null,
@@ -155,6 +161,9 @@ public sealed class WorkspaceTools
         }
 
         var byProject = all.GroupBy(d => d.Project ?? "(workspace)").ToDictionary(g => g.Key, g => g.Count());
-        return new DiagnosticsResult(all.Count, byProject, all.Take(maxResults).ToList(), all.Count > maxResults);
+        var (exact, inferred, nameOnly, external, unresolved) = snapshot.Index.MemberReferenceCounts();
+        var bound = exact + inferred + nameOnly;
+        var binding = new BindingSummary(exact, inferred, nameOnly, bound == 0 ? 0 : Math.Round((double)nameOnly / bound, 4), external, unresolved);
+        return new DiagnosticsResult(all.Count, byProject, all.Take(maxResults).ToList(), all.Count > maxResults, binding);
     }
 }

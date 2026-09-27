@@ -11,20 +11,32 @@ namespace PaspanCodeGraph.Tests.CSharp;
 /// </summary>
 internal static class RoslynOracle
 {
-    private static readonly Lazy<(WorkspaceSnapshot Snapshot, List<CSharpCompilation> Compilations)> Loaded = new(Load);
+    private static readonly Lazy<(WorkspaceSnapshot Snapshot, List<CSharpCompilation> Compilations)> Loaded =
+        new(() => Load(Path.Combine(TestPaths.RepositoryRoot, "external", "PaspanParsers", "PaspanParsers.slnx")));
+
+    private static readonly Lazy<(WorkspaceSnapshot Snapshot, List<CSharpCompilation> Compilations)> LoadedSelf =
+        new(() => Load(Path.Combine(TestPaths.RepositoryRoot, "PaspanCodeGraphMcp.slnx")));
 
     public static WorkspaceSnapshot Snapshot => Loaded.Value.Snapshot;
 
     public static IReadOnlyList<CSharpCompilation> Compilations => Loaded.Value.Compilations;
 
-    private static (WorkspaceSnapshot, List<CSharpCompilation>) Load()
+    /// <summary>This repository's solution (with the PaspanParsers projects it builds), loaded the same way.</summary>
+    public static WorkspaceSnapshot SelfSnapshot => LoadedSelf.Value.Snapshot;
+
+    public static IReadOnlyList<CSharpCompilation> SelfCompilations => LoadedSelf.Value.Compilations;
+
+    private static (WorkspaceSnapshot, List<CSharpCompilation>) Load(string solution)
     {
-        var solution = Path.Combine(TestPaths.RepositoryRoot, "external", "PaspanParsers", "PaspanParsers.slnx");
         var snapshot = WorkspaceLoader.Load(solution);
 
+        // The framework, and the packages the test binaries carry (MSTest, Roslyn, the MCP SDK) for projects that use them
+        var projectNames = snapshot.Projects.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var references = ((string)AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES"))
             .Split(Path.PathSeparator)
-            .Where(p => Path.GetFileName(p).StartsWith("System.", StringComparison.Ordinal) || Path.GetFileName(p) == "netstandard.dll")
+            .Where(p => Path.GetFileName(p).StartsWith("System.", StringComparison.Ordinal) || Path.GetFileName(p) is "netstandard.dll" or "Microsoft.CSharp.dll")
+            .Concat(Directory.EnumerateFiles(AppContext.BaseDirectory, "*.dll").Where(p => !projectNames.Contains(Path.GetFileNameWithoutExtension(p)) && !Path.GetFileName(p).StartsWith("System.", StringComparison.Ordinal)))
+            .DistinctBy(Path.GetFileName)
             .Select(p => (MetadataReference)MetadataReference.CreateFromFile(p))
             .ToList();
 

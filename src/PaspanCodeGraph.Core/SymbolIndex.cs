@@ -70,6 +70,7 @@ public sealed class SymbolIndex
     private readonly Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> _byFile;
     private readonly Dictionary<string, List<SymbolReference>> _references;
     private readonly Dictionary<string, List<(CodeSymbol Target, SymbolReference Reference)>> _referencesByFile = new(SymbolIndexBuilder.PathComparer);
+    private readonly Dictionary<string, List<(string TargetId, SymbolReference Reference)>> _referencesFrom = new(StringComparer.Ordinal);
 
     internal SymbolIndex(
         Dictionary<string, CodeSymbol> byId,
@@ -82,6 +83,19 @@ public sealed class SymbolIndex
         foreach (var (id, list) in _references)
         {
             list.Sort((a, b) => a.File == b.File ? a.Start.CompareTo(b.Start) : string.CompareOrdinal(a.File, b.File));
+            foreach (var reference in list)
+            {
+                if (reference.InMember is { } from)
+                {
+                    if (!_referencesFrom.TryGetValue(from, out var fromList))
+                    {
+                        _referencesFrom[from] = fromList = [];
+                    }
+
+                    fromList.Add((id, reference));
+                }
+            }
+
             if (_byId.TryGetValue(id, out var target))
             {
                 foreach (var reference in list)
@@ -96,9 +110,15 @@ public sealed class SymbolIndex
             }
         }
 
+        // At one position the surest reference comes first
         foreach (var list in _referencesByFile.Values)
         {
-            list.Sort((a, b) => a.Reference.Start.CompareTo(b.Reference.Start));
+            list.Sort((a, b) => a.Reference.Start != b.Reference.Start ? a.Reference.Start.CompareTo(b.Reference.Start) : a.Reference.Confidence.CompareTo(b.Reference.Confidence));
+        }
+
+        foreach (var list in _referencesFrom.Values)
+        {
+            list.Sort((a, b) => a.Reference.File == b.Reference.File ? a.Reference.Start.CompareTo(b.Reference.Start) : string.CompareOrdinal(a.Reference.File, b.Reference.File));
         }
 
         foreach (var list in _byFile.Values)
@@ -117,6 +137,50 @@ public sealed class SymbolIndex
 
     /// <summary>The references to the symbol with <paramref name="id"/>, by file and position.</summary>
     public IReadOnlyList<SymbolReference> ReferencesTo(string id) => _references.TryGetValue(id, out var list) ? list : [];
+
+    /// <summary>
+    /// The references made in the declaration with <paramref name="memberId"/> (its body, signature and attributes),
+    /// with their targets: workspace symbol ids, or <see cref="ReferenceTargets"/> ids.
+    /// </summary>
+    public IReadOnlyList<(string TargetId, SymbolReference Reference)> ReferencesFrom(string memberId) =>
+        _referencesFrom.TryGetValue(memberId, out var list) ? list : [];
+
+    /// <summary>The number of references to workspace members (not types or namespaces), by confidence, and of unbound calls.</summary>
+    public (int Exact, int Inferred, int NameOnly, int External, int Unresolved) MemberReferenceCounts()
+    {
+        int exact = 0, inferred = 0, nameOnly = 0, external = 0, unresolved = 0;
+        foreach (var (id, list) in _references)
+        {
+            if (id.StartsWith(ReferenceTargets.External, StringComparison.Ordinal))
+            {
+                external += list.Count;
+            }
+            else if (id.StartsWith(ReferenceTargets.Unresolved, StringComparison.Ordinal))
+            {
+                unresolved += list.Count;
+            }
+            else if (_byId.TryGetValue(id, out var target) && !target.Kind.IsType() && target.Kind != SymbolKind.Namespace)
+            {
+                foreach (var reference in list)
+                {
+                    switch (reference.Confidence)
+                    {
+                        case Confidence.Exact:
+                            exact++;
+                            break;
+                        case Confidence.Inferred:
+                            inferred++;
+                            break;
+                        default:
+                            nameOnly++;
+                            break;
+                    }
+                }
+            }
+        }
+
+        return (exact, inferred, nameOnly, external, unresolved);
+    }
 
     /// <summary>The references in <paramref name="file"/> (a full path) and what they refer to, in source order.</summary>
     public IReadOnlyList<(CodeSymbol Target, SymbolReference Reference)> ReferencesInFile(string file) =>
