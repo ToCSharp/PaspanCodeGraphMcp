@@ -160,6 +160,98 @@ public sealed class HierarchyFixtureTests
         }
         """;
 
+
+    private const string Calls = """
+        using System.Text;
+        using Geometry;
+        using static Calls.Helpers;
+
+        namespace Calls
+        {
+            public static class Helpers
+            {
+                public static int Twice(int x) => x * 2;
+                public static string Twice(string s) => s + s;
+                public static T Echo<T>(T value) => value;
+                public static IEnumerable<TOut> Map<TIn, TOut>(this IEnumerable<TIn> items, Func<TIn, TOut> f) => items.Select(f);
+                public static bool IsBig(this Shape shape) => shape.Area > 10;
+                public static string Join(string separator, params string[] parts) => string.Join(separator, parts);
+            }
+
+            public record Point(int X, int Y)
+            {
+                public int Sum => X + Y;
+                public Point Move(int dx) => this with { X = X + dx };
+            }
+
+            public class Matrix
+            {
+                private readonly Dictionary<(int, int), double> _cells = new();
+                public double this[int row, int column] { get => _cells[(row, column)]; set => _cells[(row, column)] = value; }
+                public double this[Point p] => this[p.X, p.Y];
+                public int Rows { get; init; }
+                public event EventHandler? Changed;
+                public void Raise() => Changed?.Invoke(this, EventArgs.Empty);
+            }
+
+            public class Base
+            {
+                public Base() { }
+                public Base(int seed) { Seed = seed; }
+                public int Seed { get; }
+                public virtual string Name() => "base";
+                protected void Log(string text) { }
+                protected void Log(string format, params object[] args) { }
+            }
+
+            public class Derived : Base
+            {
+                private readonly List<Point> _points = [];
+
+                public Derived() : this(1) { }
+                public Derived(int seed) : base(seed) { }
+
+                public override string Name() => base.Name() + "!";
+
+                public int Run(Matrix m, IShape shape, Store<Circle> store)
+                {
+                    Log("start");
+                    Log("{0}", 1);
+                    var p = new Point(1, 2);
+                    var moved = p.Move(3);
+                    var (x, y) = moved;
+                    var total = Twice(x) + Twice("a").Length + Echo(y);
+                    var names = _points.Map(pt => pt.Sum).Where(v => v > 0).Select(v => Twice(v)).ToList();
+                    foreach (var point in _points)
+                    {
+                        total += point.X;
+                    }
+
+                    m[1, 2] = m[p] + m.Rows;
+                    var copy = new Matrix { Rows = m.Rows };
+                    copy.Changed += (_, _) => Log("changed");
+                    m.Raise();
+                    store.Put(new Circle(2));
+                    var first = store.Get(0);
+                    if (first.IsBig() && shape.Describe().Length > 0)
+                    {
+                        total += (int)shape.Area;
+                    }
+
+                    if (shape is Circle { Name: "circle" } circle)
+                    {
+                        total += circle.Describe().Length;
+                    }
+
+                    int Local(int v) => v + Seed;
+                    Func<int, int> twice = Twice;
+                    var text = new StringBuilder().Append(Join(",", "a", "b")).ToString();
+                    return Local(total) + twice(1) + text.Length + names.Count + nameof(Run).Length;
+                }
+            }
+        }
+        """;
+
     private static SymbolIndex _index;
     private static List<CSharpCompilation> _compilations;
     private static TempWorkspace _workspace;
@@ -169,7 +261,7 @@ public sealed class HierarchyFixtureTests
     {
         _workspace = new TempWorkspace();
         var project = _workspace.Write("Fixture/Fixture.csproj", Project);
-        var files = new[] { _workspace.Write("Fixture/Shapes.cs", Shapes), _workspace.Write("Fixture/Uses.cs", Uses) };
+        var files = new[] { _workspace.Write("Fixture/Shapes.cs", Shapes), _workspace.Write("Fixture/Uses.cs", Uses), _workspace.Write("Fixture/Calls.cs", Calls) };
         var snapshot = WorkspaceLoader.Load(project);
         _index = snapshot.Index;
 
@@ -220,5 +312,13 @@ public sealed class HierarchyFixtureTests
         var (result, recall, precision) = HierarchyComparison.TypeReferences(_index, _compilations);
         Assert.IsTrue(result.Compared > 50, result.Report("references"));
         Assert.AreEqual(0, result.Differences.Count, $"recall {recall:P2}, precision {precision:P2}; " + result.Report("references"));
+    }
+
+    [TestMethod]
+    public void MemberReferences_MatchRoslyn()
+    {
+        var result = HierarchyComparison.MemberReferences(_index, _compilations);
+        Assert.IsTrue(result.Result.Compared > 60, result.Report());
+        Assert.AreEqual(0, result.Result.Differences.Count, result.Report());
     }
 }

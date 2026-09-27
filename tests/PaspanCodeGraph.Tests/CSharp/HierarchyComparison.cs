@@ -194,4 +194,162 @@ internal static class HierarchyComparison
         var wrong = missing.Select(m => "missing " + m).Take(200).Concat(extra.Select(e => "extra " + e).Take(200)).ToList();
         return (new Result(expected.Count, wrong), recall, precision);
     }
+
+    /// <summary>What the member reference comparison found.</summary>
+    /// <param name="Recall">The share of Roslyn's references found as exact or inferred.</param>
+    /// <param name="Precision">The share of exact and inferred references that Roslyn agrees with.</param>
+    /// <param name="NameOnlyCovered">The share of Roslyn's references missing from exact and inferred that name-only candidates include.</param>
+    public sealed record MemberResult(Result Result, double Recall, double Precision, double ExactPrecision, int Exact, int Inferred, int NameOnly, double NameOnlyCovered)
+    {
+        public string Report() =>
+            $"recall {Recall:P2}, precision {Precision:P2} (exact {ExactPrecision:P2}); {Exact} exact, {Inferred} inferred, {NameOnly} name-only (cover {NameOnlyCovered:P1} of the missing); "
+            + Result.Report("member references");
+    }
+
+    /// <summary>
+    /// The references to workspace members (methods, constructors, properties, indexers, fields, events, enum
+    /// members): each name Roslyn binds to one, constructor calls at the type's name (or <c>new</c>, <c>base</c>,
+    /// <c>this</c>) and indexers at <c>[</c>, compared with the exact and inferred references of the index.
+    /// </summary>
+    public static MemberResult MemberReferences(SymbolIndex index, IEnumerable<CSharpCompilation> compilations)
+    {
+        // A member of the index by the location of its name: ids with types from references are not Roslyn's
+        var byLocation = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var symbol in index.Symbols)
+        {
+            foreach (var declaration in symbol.Declarations)
+            {
+                byLocation.TryAdd($"{declaration.File}:{declaration.Line}:{declaration.Column}:{symbol.Kind.IsType()}", symbol.Id);
+            }
+        }
+
+        string IdOf(ISymbol member)
+        {
+            foreach (var location in member.Locations.Where(l => l.IsInSource))
+            {
+                var position = location.GetLineSpan().StartLinePosition;
+                if (byLocation.TryGetValue($"{location.SourceTree!.FilePath}:{position.Line + 1}:{position.Character + 1}:{false}", out var id))
+                {
+                    return id;
+                }
+            }
+
+            return member.GetDocumentationCommentId()!;
+        }
+
+        var expected = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var compilation in compilations)
+        {
+            foreach (var tree in Trees(compilation))
+            {
+                var model = compilation.GetSemanticModel(tree);
+                void Add(ISymbol? symbol, SyntaxToken token) => AddAt(symbol, token.GetLocation());
+                void AddAt(ISymbol? symbol, Location location)
+                {
+                    if (Normalize(symbol) is { } member)
+                    {
+                        var position = location.GetLineSpan().StartLinePosition;
+                        expected.Add($"{tree.FilePath}:{position.Line + 1}:{position.Character + 1} {IdOf(member)}");
+                    }
+                }
+
+                foreach (var node in tree.GetRoot().DescendantNodes())
+                {
+                    switch (node)
+                    {
+                        case SimpleNameSyntax name:
+                        {
+                            var info = model.GetSymbolInfo(name);
+                            var symbol = info.Symbol ?? (info.CandidateSymbols.Length == 1 ? info.CandidateSymbols[0] : null);
+                            if (symbol is IMethodSymbol { MethodKind: MethodKind.Constructor } && name.FirstAncestorOrSelf<AttributeSyntax>() is not { } attribute)
+                            {
+                                break;
+                            }
+
+                            Add(symbol, name.Identifier);
+                            break;
+                        }
+
+                        case ObjectCreationExpressionSyntax creation when LastName(creation.Type) is { } typeName:
+                            Add(model.GetSymbolInfo(creation).Symbol, typeName);
+                            break;
+                        case ImplicitObjectCreationExpressionSyntax implicitCreation:
+                            Add(model.GetSymbolInfo(implicitCreation).Symbol, implicitCreation.NewKeyword);
+                            break;
+                        case ConstructorInitializerSyntax initializer:
+                            Add(model.GetSymbolInfo(initializer).Symbol, initializer.ThisOrBaseKeyword);
+                            break;
+                        case PrimaryConstructorBaseTypeSyntax baseType when LastName(baseType.Type) is { } baseName:
+                            Add(model.GetSymbolInfo(baseType).Symbol, baseName);
+                            break;
+                        case ElementAccessExpressionSyntax element:
+                            Add(model.GetSymbolInfo(element).Symbol, element.ArgumentList.OpenBracketToken);
+                            break;
+                        case ImplicitElementAccessSyntax implicitElement:
+                            Add(model.GetSymbolInfo(implicitElement).Symbol, implicitElement.ArgumentList.OpenBracketToken);
+                            break;
+                    }
+                }
+            }
+        }
+
+        var actual = new HashSet<string>(StringComparer.Ordinal);
+        var exact = new HashSet<string>(StringComparer.Ordinal);
+        var nameOnly = new HashSet<string>(StringComparer.Ordinal);
+        int exactCount = 0, inferredCount = 0, nameOnlyCount = 0;
+        foreach (var symbol in index.Symbols.Where(s => !s.Kind.IsType() && s.Kind != SymbolKind.Namespace))
+        {
+            foreach (var reference in index.ReferencesTo(symbol.Id))
+            {
+                var key = $"{reference.File}:{reference.Line}:{reference.Column} {symbol.Id}";
+                switch (reference.Confidence)
+                {
+                    case Confidence.Exact:
+                        exactCount++;
+                        exact.Add(key);
+                        actual.Add(key);
+                        break;
+                    case Confidence.Inferred:
+                        inferredCount++;
+                        actual.Add(key);
+                        break;
+                    default:
+                        nameOnlyCount++;
+                        nameOnly.Add(key);
+                        break;
+                }
+            }
+        }
+
+        var missing = expected.Except(actual).Order().ToList();
+        var extra = actual.Except(expected).Order().ToList();
+        var recall = expected.Count == 0 ? 1 : 1 - (double)missing.Count / expected.Count;
+        var precision = actual.Count == 0 ? 1 : 1 - (double)extra.Count / actual.Count;
+        var exactPrecision = exact.Count == 0 ? 1 : 1 - (double)exact.Except(expected).Count() / exact.Count;
+        var covered = missing.Count == 0 ? 1 : (double)missing.Count(nameOnly.Contains) / missing.Count;
+        var wrong = missing.Select(m => "missing " + m).Concat(extra.Select(e => (exact.Contains(e) ? "extra exact " : "extra ") + e)).ToList();
+        return new MemberResult(new Result(expected.Count, wrong), recall, precision, exactPrecision, exactCount, inferredCount, nameOnlyCount, covered);
+    }
+
+    private static SyntaxToken? LastName(TypeSyntax type) => type switch
+    {
+        SimpleNameSyntax simple => simple.Identifier,
+        QualifiedNameSyntax qualified => qualified.Right.Identifier,
+        AliasQualifiedNameSyntax alias => alias.Name.Identifier,
+        _ => null,
+    };
+
+    /// <summary>A workspace member as the index records it: the definition, and an extension method's declaration.</summary>
+    private static ISymbol? Normalize(ISymbol? symbol)
+    {
+        var member = symbol switch
+        {
+            IMethodSymbol { MethodKind: MethodKind.LocalFunction or MethodKind.AnonymousFunction or MethodKind.BuiltinOperator } => null,
+            IMethodSymbol method => (ISymbol)(method.ReducedFrom ?? method).OriginalDefinition,
+            IFieldSymbol { ContainingType.IsTupleType: true } => null,
+            IPropertySymbol or IFieldSymbol or IEventSymbol => symbol.OriginalDefinition,
+            _ => null,
+        };
+        return member != null && IsSource(member) && !member.IsImplicitlyDeclared ? member : null;
+    }
 }

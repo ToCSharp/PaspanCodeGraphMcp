@@ -141,7 +141,7 @@ public sealed partial class CSharpSymbolCollector
         if (type.Underlying is NamedType named && _binder.Constructors(named) is { Count: > 0 } constructors && Resolve(constructors, arguments, [], null, context) is { } chosen)
         {
             CompleteArguments(chosen, arguments, context, inMember);
-            RecordReference(chosen.Member.Symbol.Id, position, inMember, exact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+            RecordResolved(chosen, position, inMember, exact);
             return;
         }
 
@@ -635,10 +635,42 @@ public sealed partial class CSharpSymbolCollector
             case ParenthesizedVariableDesignation parenthesized:
                 for (var i = 0; i < parenthesized.Variables.Count; i++)
                 {
-                    DeclareDesignation(parenthesized.Variables[i], type is TupleType tuple && i < tuple.Elements.Count ? tuple.Elements[i] : SemType.Unknown);
+                    DeclareDesignation(parenthesized.Variables[i], TupleElements(type) is { } elements && i < elements.Count ? elements[i] : SemType.Unknown);
                 }
 
                 break;
+        }
+    }
+
+    /// <summary>What deconstructing a value gives: a tuple's elements, a <c>Deconstruct</c> method's out parameters, a positional record's properties.</summary>
+    private IReadOnlyList<SemType>? TupleElements(SemType type)
+    {
+        switch (type.Underlying)
+        {
+            case TupleType tuple:
+                return tuple.Elements;
+            case ExternalType { Name: "ValueTuple" or "Tuple" or "KeyValuePair" } tuple:
+                return tuple.Arguments;
+            case NamedType named:
+            {
+                var deconstruct = _binder.LookupMembers(named, "Deconstruct").FirstOrDefault(m => m.Symbol.Kind == SymbolKind.Method);
+                if (deconstruct != null)
+                {
+                    return _binder.Parameters(deconstruct.Symbol).Where(p => p.IsOut).Select(p => deconstruct.Substitute(p.Type)).ToList();
+                }
+
+                if (named.Symbol.Kind is SymbolKind.Record or SymbolKind.RecordStruct && named.Symbol.Parameters.Count > 0)
+                {
+                    return named.Symbol.Parameters
+                        .Select(p => _binder.LookupMembers(named, p.Name).FirstOrDefault() is { } property ? property.Substitute(_binder.MemberType(property.Symbol)) : SemType.Unknown)
+                        .ToList();
+                }
+
+                return null;
+            }
+
+            default:
+                return null;
         }
     }
 
@@ -1009,6 +1041,12 @@ public sealed partial class CSharpSymbolCollector
             return new Bound(local.Type, local.Exact);
         }
 
+        if (text == "_" && arity == 0)
+        {
+            // A discard
+            return Bound.Unknown;
+        }
+
         if (arity == 0 && context.TypeParameters.ContainsKey(text))
         {
             return new Bound(new TypeExpressionType(TypeOf(new NamedTypeReference(name), context)), true);
@@ -1205,7 +1243,7 @@ public sealed partial class CSharpSymbolCollector
             if (resolution is { } chosen)
             {
                 CompleteArguments(chosen, arguments, context, inMember);
-                RecordReference(chosen.Member.Symbol.Id, bracket, inMember, target.Exact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+                RecordResolved(chosen, bracket, inMember, target.Exact);
                 return new Bound(chosen.Substitute(_binder.MemberType(chosen.Member.Symbol)), target.Exact && chosen.Unique);
             }
         }
@@ -1233,6 +1271,14 @@ public sealed partial class CSharpSymbolCollector
     {
         switch (binary.Operator)
         {
+            case BinaryOperator.Assign when binary.Left is DeclarationExpression or TupleExpression:
+            {
+                // A deconstruction: the variables get the types of the elements
+                var right = Bind(binary.Right, context, inMember);
+                Bind(binary.Left, context, inMember, right.Type.IsUnknown ? null : right.Type);
+                return right;
+            }
+
             case BinaryOperator.Assign:
             case BinaryOperator.NullCoalescingAssign:
             {
@@ -1322,7 +1368,7 @@ public sealed partial class CSharpSymbolCollector
             if (constructors.Count > 0 && Resolve(constructors, arguments, [], null, context) is { } chosen)
             {
                 CompleteArguments(chosen, arguments, context, inMember);
-                RecordReference(chosen.Member.Symbol.Id, position, inMember, exact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+                RecordResolved(chosen, position, inMember, exact);
             }
             else
             {
@@ -1385,7 +1431,7 @@ public sealed partial class CSharpSymbolCollector
                         if (indexers.Count > 0 && Resolve(indexers, arguments, [], null, context) is { } chosen)
                         {
                             CompleteArguments(chosen, arguments, context, inMember);
-                            RecordReference(chosen.Member.Symbol.Id, left.Span.Start, inMember, chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+                            RecordResolved(chosen, left.Span.Start, inMember, true);
                             memberType = chosen.Substitute(_binder.MemberType(chosen.Member.Symbol));
                         }
                         else
@@ -1668,7 +1714,7 @@ public sealed partial class CSharpSymbolCollector
         {
             CompleteArguments(chosen, args, context, inMember);
             var exact = receiver.Exact && chosen.Unique;
-            RecordReference(chosen.Member.Symbol.Id, offset, inMember, exact ? Confidence.Exact : Confidence.Inferred);
+            RecordResolved(chosen, offset, inMember, receiver.Exact);
             return new Bound(chosen.Substitute(_binder.MemberType(chosen.Member.Symbol)), exact);
         }
 
@@ -1680,7 +1726,7 @@ public sealed partial class CSharpSymbolCollector
             {
                 CompleteArguments(extension, args, context, inMember);
                 var exact = receiver.Exact && extension.Unique;
-                RecordReference(extension.Member.Symbol.Id, offset, inMember, exact ? Confidence.Exact : Confidence.Inferred);
+                RecordResolved(extension, offset, inMember, receiver.Exact);
                 return new Bound(extension.Substitute(_binder.MemberType(extension.Member.Symbol)), exact);
             }
         }
@@ -1734,6 +1780,12 @@ public sealed partial class CSharpSymbolCollector
 
         public bool Unique { get; set; } = unique;
 
+        /// <summary>The candidates overload resolution could not tell apart (the argument types are not known), this one first.</summary>
+        public IReadOnlyList<FoundMember> Tied { get; set; } = [member];
+
+        /// <summary>The first parameter of an extension method, which the receiver goes to.</summary>
+        public SemType? ReceiverParameterType => isExtension && parameters.Count > 0 ? parameters[0].Type : null;
+
         /// <summary>The type the argument at <paramref name="argument"/> converts to, with the type arguments known so far.</summary>
         public SemType? ParameterType(int argument)
         {
@@ -1745,6 +1797,13 @@ public sealed partial class CSharpSymbolCollector
 
             var type = Substitute(parameters[index].Type);
             return expanded[argument] ? SemTypes.ElementOf(type) ?? type : type;
+        }
+
+        /// <summary>The declared type of the parameter the argument at <paramref name="argument"/> goes to, before substitution.</summary>
+        public SemType? DeclaredParameterType(int argument)
+        {
+            var index = parameterOf[argument];
+            return index >= 0 && index < parameters.Count ? parameters[index].Type : null;
         }
 
         public SemType Substitute(SemType type) => SemTypes.Substitute(type, p =>
@@ -1966,7 +2025,8 @@ public sealed partial class CSharpSymbolCollector
                 }
             }
 
-            var usesExpanded = false;
+            // A params parameter without arguments is the expanded form too
+            var usesExpanded = parameters.Count > offset && parameters[^1].IsParams && !used[parameters.Count - 1];
             for (var i = 0; i < arguments.Count && fits; i++)
             {
                 var parameter = parameters[parameterOf[i]];
@@ -1988,6 +2048,11 @@ public sealed partial class CSharpSymbolCollector
 
                 if (argumentType is LambdaType lambdaType && _binder.DelegateSignature(expanded[i] ? SemTypes.ElementOf(parameterType) ?? parameterType : parameterType) is { } signature
                     && lambdaType.ParameterCount >= 0 && signature.Parameters.Count != lambdaType.ParameterCount)
+                {
+                    conversion = -1;
+                }
+
+                if (arguments[i].Argument.Expression is CollectionExpression && _binder.DelegateSignature(parameterType) != null)
                 {
                     conversion = -1;
                 }
@@ -2028,7 +2093,9 @@ public sealed partial class CSharpSymbolCollector
         var tied = best.Where(b => b.Score == first.Score && b.Generic == first.Generic && b.Expanded == first.Expanded && b.Defaults == first.Defaults).ToList();
         if (tied.Count > 1)
         {
-            var specific = tied.FirstOrDefault(t => tied.All(o => o.Resolution == t.Resolution || MoreSpecific(t.Resolution, o.Resolution, arguments.Count)));
+            var specific = tied.FirstOrDefault(t => tied.All(o => o.Resolution == t.Resolution
+                || MoreSpecific(t.Resolution, o.Resolution, arguments.Count)
+                || MoreSpecificDeclaration(t.Resolution, o.Resolution, arguments.Count)));
             if (specific.Resolution != null)
             {
                 first = specific;
@@ -2037,6 +2104,7 @@ public sealed partial class CSharpSymbolCollector
         }
 
         first.Resolution.Unique = tied.Count == 1 && (first.Unknown == 0 || applicable.Count == 1);
+        first.Resolution.Tied = tied.Select(t => t.Resolution.Member).ToList();
         return first.Resolution;
     }
 
@@ -2069,6 +2137,90 @@ public sealed partial class CSharpSymbolCollector
         }
 
         return strictly;
+    }
+
+    /// <summary>
+    /// The tie-break of generic methods whose parameter types are the same once substituted: the one whose declared
+    /// parameter types are more specific (<c>Parser&lt;(T1, T2)&gt;</c> is more specific than <c>Parser&lt;T&gt;</c>).
+    /// </summary>
+    private static bool MoreSpecificDeclaration(Resolution a, Resolution b, int argumentCount)
+    {
+        var strictly = false;
+        if (a.ReceiverParameterType is { } ra && b.ReceiverParameterType is { } rb)
+        {
+            var receiver = Specificity(ra, rb);
+            if (receiver < 0)
+            {
+                return false;
+            }
+
+            strictly = receiver > 0;
+        }
+
+        for (var i = 0; i < argumentCount; i++)
+        {
+            var pa = a.DeclaredParameterType(i);
+            var pb = b.DeclaredParameterType(i);
+            if (pa == null || pb == null)
+            {
+                return false;
+            }
+
+            var compared = Specificity(pa, pb);
+            if (compared < 0)
+            {
+                return false;
+            }
+
+            strictly |= compared > 0;
+        }
+
+        return strictly;
+    }
+
+    /// <summary>1 when <paramref name="a"/> is more specific than <paramref name="b"/>, -1 when less, 0 when neither.</summary>
+    private static int Specificity(SemType a, SemType b)
+    {
+        switch (a, b)
+        {
+            case (TypeParameterType, TypeParameterType):
+                return 0;
+            case (_, TypeParameterType):
+                return 1;
+            case (TypeParameterType, _):
+                return -1;
+            case (NamedType x, NamedType y) when x.Symbol == y.Symbol:
+                return Combine(x.Arguments, y.Arguments);
+            case (ExternalType x, ExternalType y) when x.Name == y.Name:
+                return Combine(x.Arguments, y.Arguments);
+            case (TupleType x, TupleType y):
+                return Combine(x.Elements, y.Elements);
+            case (ArrayType x, ArrayType y):
+                return Specificity(x.Element, y.Element);
+            case (NullableType x, NullableType y):
+                return Specificity(x.Element, y.Element);
+            default:
+                return 0;
+        }
+
+        static int Combine(IReadOnlyList<SemType> x, IReadOnlyList<SemType> y)
+        {
+            if (x.Count != y.Count)
+            {
+                return 0;
+            }
+
+            var more = false;
+            var less = false;
+            for (var i = 0; i < x.Count; i++)
+            {
+                var compared = Specificity(x[i], y[i]);
+                more |= compared > 0;
+                less |= compared < 0;
+            }
+
+            return more && !less ? 1 : less && !more ? -1 : 0;
+        }
     }
 
     // ========================================
@@ -2146,6 +2298,25 @@ public sealed partial class CSharpSymbolCollector
     // ========================================
     // Recording
     // ========================================
+
+    /// <summary>
+    /// Records the member overload resolution chose; when the argument types could not tell the candidates apart,
+    /// each of them as a name-only candidate.
+    /// </summary>
+    private void RecordResolved(Resolution chosen, int offset, string? inMember, bool receiverExact)
+    {
+        if (chosen.Tied.Count > 1)
+        {
+            foreach (var candidate in chosen.Tied)
+            {
+                RecordReference(candidate.Symbol.Id, offset, inMember, Confidence.NameOnly);
+            }
+
+            return;
+        }
+
+        RecordReference(chosen.Member.Symbol.Id, offset, inMember, receiverExact && chosen.Unique ? Confidence.Exact : Confidence.Inferred);
+    }
 
     private void RecordReference(string targetId, int offset, string? inMember, Confidence confidence)
     {

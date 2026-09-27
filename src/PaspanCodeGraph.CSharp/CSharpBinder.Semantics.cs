@@ -411,7 +411,14 @@ public sealed partial class CSharpBinder
 
             foreach (var baseType in BaseTypes(type.Symbol))
             {
-                Enqueue(SemTypes.Substitute(baseType, map));
+                // A class or struct declares every member of the interfaces it implements, so these add nothing
+                var substituted = SemTypes.Substitute(baseType, map);
+                if (type.Symbol.Kind != SymbolKind.Interface && substituted is NamedType { Symbol.Kind: SymbolKind.Interface })
+                {
+                    continue;
+                }
+
+                Enqueue(substituted);
             }
         }
 
@@ -592,9 +599,15 @@ public sealed partial class CSharpBinder
             return 0;
         }
 
-        if (from is TypeExpressionType or NamespaceExpressionType || from == SemType.Void)
+        if (from == SemType.Void)
         {
             return -1;
+        }
+
+        // A value is never a type: a name taken for a type is a value whose type is not known
+        if (from is TypeExpressionType or NamespaceExpressionType)
+        {
+            return 0;
         }
 
         if (to is TypeParameterType { IsMethod: true })

@@ -272,6 +272,29 @@ public static class SemTypes
     /// </summary>
     public static (SemType? LambdaParameter, Func<SemType?, SemType> Result)? KnownMethod(SemType receiver, string name)
     {
+        switch (name)
+        {
+            case "ToString":
+                return (null, _ => String);
+            case "GetHashCode" or "CompareTo":
+                return (null, _ => Int32);
+            case "Equals" or "StartsWith" or "EndsWith" or "IsMatch" or "TryGetValue" or "TryAdd" or "ContainsKey":
+                return (null, _ => Boolean);
+            case "GetType":
+                return (null, _ => SystemType);
+            case "AsSpan" or "AsMemory" when receiver.Underlying is ExternalType { Name: "String" }:
+                return (null, _ => new ExternalType(name == "AsSpan" ? "ReadOnlySpan" : "ReadOnlyMemory", name == "AsSpan" ? "System.ReadOnlySpan" : "System.ReadOnlyMemory", [Char]));
+            case "AsSpan" or "AsMemory" when receiver.Underlying is ArrayType array:
+                return (null, _ => new ExternalType(name == "AsSpan" ? "Span" : "Memory", name == "AsSpan" ? "System.Span" : "System.Memory", [array.Element]));
+            case "Trim" or "TrimStart" or "TrimEnd" or "Substring" or "Replace" or "ToUpper" or "ToLower" or "ToUpperInvariant" or "ToLowerInvariant"
+                or "PadLeft" or "PadRight" or "Insert" or "Remove" or "Normalize" when receiver.Underlying is ExternalType { Name: "String" }:
+                return (null, _ => String);
+            case "Split" when receiver.Underlying is ExternalType { Name: "String" }:
+                return (null, _ => new ArrayType(String, 1));
+            case "IndexOf" or "LastIndexOf" or "IndexOfAny" when receiver.Underlying is ExternalType { Name: "String" }:
+                return (null, _ => Int32);
+        }
+
         var element = ElementOf(receiver);
         if (element == null)
         {
@@ -293,7 +316,7 @@ public static class SemTypes
             "Select" => (element, result => Sequence(result ?? SemType.Unknown)),
             "SelectMany" => (element, result => Sequence(result != null ? ElementOf(result) ?? SemType.Unknown : SemType.Unknown)),
             "First" or "FirstOrDefault" or "Last" or "LastOrDefault" or "Single" or "SingleOrDefault" or "ElementAt" or "ElementAtOrDefault"
-                or "MinBy" or "MaxBy" or "Find" or "FindLast" => (element, _ => element),
+                or "MinBy" or "MaxBy" or "Find" or "FindLast" or "Pop" or "Peek" or "Dequeue" => (element, _ => element),
             "Min" or "Max" or "Sum" or "Average" => (element, result => result ?? element),
             "Any" or "All" or "Contains" or "Exists" or "TrueForAll" or "SequenceEqual" or "Remove" => (element, _ => Boolean),
             "Count" or "LongCount" or "FindIndex" or "FindLastIndex" or "IndexOf" or "RemoveAll" => (element, _ => Int32),
