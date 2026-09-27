@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>PaspanCodeGraphMcp</RootNamespace>
+    <AssemblyName>paspan-code-graph-mcp</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>paspan-code-graph-mcp</ToolCommandName>
+    <PackageId>PaspanCodeGraphMcp</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Read-only MCP server for C# code analysis by AI agents, powered by PaspanParsers: symbols, outlines and declarations without Roslyn or MSBuild.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaspanCodeGraph.Workspace\PaspanCodeGraph.Workspace.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />
+  </ItemGroup>
+</Project>

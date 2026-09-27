@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Language-neutral model of a code graph: symbols, locations and the symbol index.</Description>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,24 @@
+# PaspanCodeGraphMcp
+
+## Build and test
+
+- Build: `dotnet build PaspanCodeGraphMcp.slnx`
+- Run tests: `dotnet run --project tests/PaspanCodeGraph.Tests`
+
+Do not use `dotnet test`: the test project uses Microsoft.Testing.Platform, and the VSTest-based `dotnet test` is rejected by the .NET 10 SDK.
+
+## Layout
+
+- `external/PaspanParsers` is a git submodule; the C# parser changes go to that repository, not here.
+- `src/PaspanCodeGraph.Core`: `CodeSymbol` (with its hierarchy links) and `SymbolIndex` (search, declarations and references by file), no parser types.
+- `src/PaspanCodeGraph.CSharp`: `CSharpSymbolCollector` turns PaspanParsers syntax trees into symbols and references in three passes (types, members, references); `CSharpSymbolCollector.Bodies.cs` binds bodies (locals, expression types, overload resolution, lambdas); `CSharpBinder` binds type names, and `CSharpBinder.Semantics.cs` gives member types, member lookup and conversions over the `SemType` model (`SemanticTypes.cs`, with a small base class library model); `CSharpHierarchy` links bases, overrides and interface implementations; `DocumentationIds` builds ids.
+- `src/PaspanCodeGraph.Workspace`: solution discovery, project file reading without MSBuild, parallel parsing into a `WorkspaceSnapshot`.
+- `src/PaspanCodeGraphMcp`: the stdio MCP server and its tools.
+- `Directory.Build.props` lives in `src/` (and `tests/` imports it), not at the root, so that it does not apply to the submodule's projects.
+
+## Oracles
+
+- `DocumentationIdOracleTests` loads the PaspanParsers submodule's solution and checks ids and name locations against Roslyn's `ISymbol.GetDocumentationCommentId()` and `Locations`; `DeclarationFixtureTests` does the same for a file with declarations of every kind. Both must pass.
+- `HierarchyOracleTests` (the PaspanParsers solution) and `HierarchyFixtureTests` (hard cases) compare base types, overrides, interface implementations, type references and member references with Roslyn through `HierarchyComparison`. Both must pass.
+- Member references (`MemberReferences_MatchRoslyn`, also in `SelfOracleTests` on this repository's solution) must keep a precision of at least 95% and a recall of at least 85% for exact and inferred references; the fixture must match exactly. The differences are written to `member-references-report.txt` (and `self-member-references-report.txt`) in the test output directory.
+- Ids follow XML documentation comments, not `DocumentationCommentId.CreateDeclarationId`, which in Roslyn 5 appends `~ReturnType` to every method.

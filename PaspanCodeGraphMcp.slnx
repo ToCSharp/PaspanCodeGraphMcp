@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PaspanCodeGraph.Core/PaspanCodeGraph.Core.csproj" />
+    <Project Path="src/PaspanCodeGraph.CSharp/PaspanCodeGraph.CSharp.csproj" />
+    <Project Path="src/PaspanCodeGraph.Workspace/PaspanCodeGraph.Workspace.csproj" />
+    <Project Path="src/PaspanCodeGraphMcp/PaspanCodeGraphMcp.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PaspanCodeGraph.Tests/PaspanCodeGraph.Tests.csproj" />
+  </Folder>
+  <Folder Name="/external/">
+    <Project Path="external/PaspanParsers/src/Paspan/Paspan.csproj" />
+    <Project Path="external/PaspanParsers/src/PaspanParsers/PaspanParsers.csproj" />
+  </Folder>
+</Solution>
