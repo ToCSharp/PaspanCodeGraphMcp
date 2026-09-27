@@ -69,6 +69,7 @@ public sealed class SymbolIndex
     private readonly Dictionary<string, CodeSymbol> _byId;
     private readonly Dictionary<string, List<(CodeSymbol Symbol, SourceLocation Location)>> _byFile;
     private readonly Dictionary<string, List<SymbolReference>> _references;
+    private readonly Dictionary<string, List<(CodeSymbol Target, SymbolReference Reference)>> _referencesByFile = new(SymbolIndexBuilder.PathComparer);
 
     internal SymbolIndex(
         Dictionary<string, CodeSymbol> byId,
@@ -78,9 +79,26 @@ public sealed class SymbolIndex
         _byId = byId;
         _byFile = byFile;
         _references = references;
-        foreach (var list in _references.Values)
+        foreach (var (id, list) in _references)
         {
             list.Sort((a, b) => a.File == b.File ? a.Start.CompareTo(b.Start) : string.CompareOrdinal(a.File, b.File));
+            if (_byId.TryGetValue(id, out var target))
+            {
+                foreach (var reference in list)
+                {
+                    if (!_referencesByFile.TryGetValue(reference.File, out var inFile))
+                    {
+                        _referencesByFile[reference.File] = inFile = [];
+                    }
+
+                    inFile.Add((target, reference));
+                }
+            }
+        }
+
+        foreach (var list in _referencesByFile.Values)
+        {
+            list.Sort((a, b) => a.Reference.Start.CompareTo(b.Reference.Start));
         }
 
         foreach (var list in _byFile.Values)
@@ -99,6 +117,25 @@ public sealed class SymbolIndex
 
     /// <summary>The references to the symbol with <paramref name="id"/>, by file and position.</summary>
     public IReadOnlyList<SymbolReference> ReferencesTo(string id) => _references.TryGetValue(id, out var list) ? list : [];
+
+    /// <summary>The references in <paramref name="file"/> (a full path) and what they refer to, in source order.</summary>
+    public IReadOnlyList<(CodeSymbol Target, SymbolReference Reference)> ReferencesInFile(string file) =>
+        _referencesByFile.TryGetValue(file, out var list) ? list : [];
+
+    /// <summary>The reference whose name covers a 1-based line and column (UTF-16) of <paramref name="file"/>, or null.</summary>
+    public (CodeSymbol Target, SymbolReference Reference)? ReferenceAt(string file, int line, int column)
+    {
+        foreach (var entry in ReferencesInFile(file))
+        {
+            var reference = entry.Reference;
+            if (reference.Line == line && reference.Column <= column && column <= reference.Column + entry.Target.Name.Length)
+            {
+                return entry;
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>The number of references recorded.</summary>
     public int ReferenceCount => _references.Values.Sum(l => l.Count);

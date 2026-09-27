@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using PaspanCodeGraph;
 using PaspanCodeGraph.Workspace;
@@ -20,7 +19,25 @@ public sealed record SymbolInfoResult(
     IReadOnlyList<ParameterDto> Parameters,
     IReadOnlyList<string> TypeParameters,
     IReadOnlyList<string> BaseTypes,
-    IReadOnlyList<LocationDto> Declarations);
+    IReadOnlyList<LocationDto> Declarations,
+    RelationsDto Relations);
+
+/// <summary>How a symbol relates to others; ids of workspace symbols, and base types from references as written.</summary>
+/// <param name="BaseType">The base class: its id, or its name as written when it is not a workspace type.</param>
+/// <param name="Interfaces">The interfaces a type lists, the same way.</param>
+/// <param name="DerivedTypes">The number of types deriving directly from a type (type_hierarchy lists them).</param>
+/// <param name="Overrides">The member a member overrides.</param>
+/// <param name="Implements">The interface members a member implements.</param>
+/// <param name="Implementations">The number of members implementing or overriding a member directly (find_implementations lists them at any depth).</param>
+/// <param name="References">The number of references to a type (find_references lists them).</param>
+public sealed record RelationsDto(
+    string? BaseType,
+    IReadOnlyList<string> Interfaces,
+    int DerivedTypes,
+    string? Overrides,
+    IReadOnlyList<string> Implements,
+    int Implementations,
+    int References);
 
 public sealed record DefinitionResult(SymbolDto Symbol, IReadOnlyList<LocationDto> Declarations);
 
@@ -33,7 +50,7 @@ public sealed record OutlineItem(string Id, string Kind, string Name, string Sig
 public sealed record FileOutlineResult(string File, string? Project, int SyntaxErrors, IReadOnlyList<OutlineItem> Items);
 
 [McpServerToolType]
-public sealed partial class NavigationTools
+public sealed class NavigationTools
 {
     /// <summary>Ambiguity lists are meant to be scanned by an agent; beyond this it should narrow the query.</summary>
     private const int MaxCandidates = 20;
@@ -57,7 +74,7 @@ public sealed partial class NavigationTools
     }
 
     [McpServerTool(Name = "symbol_info", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Symbol details")]
-    [Description("Signature, documentation summary, accessibility, modifiers, parameters, type parameters, base types as written, and all declaration locations (partial types).")]
+    [Description("Signature, documentation summary, accessibility, modifiers, parameters, type parameters, base types as written, all declaration locations (partial types), and relations: bound base class and interfaces, overridden and implemented members, and counts of derived types, implementations and references.")]
     public static async Task<object> SymbolInfo(
         WorkspaceHost host,
         [Description("Symbol id (T:/M:/P:/F:/E:), 'file.cs:line:col', or a (dotted) name")] string symbol,
@@ -79,11 +96,26 @@ public sealed partial class NavigationTools
             resolved.Parameters.Select(p => new ParameterDto(p.Name, p.Type, p.Modifier, p.DefaultValue)).ToList(),
             resolved.TypeParameters,
             resolved.BaseTypes,
-            resolved.Declarations.Select(d => SymbolFormatter.ToLocation(d, snapshot)).ToList());
+            resolved.Declarations.Select(d => SymbolFormatter.ToLocation(d, snapshot)).ToList(),
+            Relations(resolved, snapshot));
+    }
+
+    private static RelationsDto Relations(CodeSymbol symbol, WorkspaceSnapshot snapshot)
+    {
+        string LinkName(TypeLink link) => link.Symbol?.Id ?? link.Written;
+        var hasBaseClass = symbol.Bases.Count > 0 && HierarchyTools.IsBaseClass(symbol, 0);
+        return new RelationsDto(
+            hasBaseClass ? LinkName(symbol.Bases[0]) : null,
+            symbol.Bases.Skip(hasBaseClass ? 1 : 0).Select(LinkName).ToList(),
+            symbol.DerivedTypes.Count,
+            symbol.Overrides?.Id,
+            symbol.Implements.Select(i => i.Id).ToList(),
+            symbol.ImplementedBy.Count + symbol.OverriddenBy.Count,
+            symbol.Kind.IsType() ? snapshot.Index.ReferencesTo(symbol.Id).Count : 0);
     }
 
     [McpServerTool(Name = "go_to_definition", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Go to definition")]
-    [Description("Declaration location(s) of a symbol, including all parts of partial types. A position resolves to the declaration whose name is there, else to the innermost declaration containing it (references are not resolved yet).")]
+    [Description("Declaration location(s) of a symbol, including all parts of partial types. A position resolves to the declaration whose name is there, else to the type named by a reference there, else to the innermost declaration containing it (member references are not resolved yet).")]
     public static async Task<object> GoToDefinition(
         WorkspaceHost host,
         [Description("Symbol id, 'file.cs:line:col', or a (dotted) name")] string symbol,
@@ -102,7 +134,7 @@ public sealed partial class NavigationTools
     }
 
     [McpServerTool(Name = "type_members", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Type members")]
-    [Description("Outline of a type: its declared members with ids, kinds, accessibility. Cheap way to get member ids. includeInherited adds the members of base types declared in the workspace, found by name (base types are not bound, so a name shared by several types may pick the wrong one).")]
+    [Description("Outline of a type: its declared members with ids, kinds, accessibility. Cheap way to get member ids. includeInherited adds the members of the base types and interfaces declared in the workspace; bases from referenced assemblies are listed as unresolved.")]
     public static async Task<object> TypeMembers(
         WorkspaceHost host,
         [Description("Type id (T:...), 'file.cs:line:col', or a (dotted) type name")] string symbol,
@@ -150,91 +182,21 @@ public sealed partial class NavigationTools
                 break;
             }
 
-            foreach (var baseType in current.BaseTypes)
+            foreach (var link in current.Bases)
             {
-                if (FindBaseType(snapshot.Index, current, baseType) is { } found)
+                if (link.Symbol is { } found)
                 {
                     pending.Enqueue(found);
                 }
-                else if (!unresolved.Contains(baseType))
+                else if (!unresolved.Contains(link.Written))
                 {
-                    unresolved.Add(baseType);
+                    unresolved.Add(link.Written);
                 }
             }
         }
 
         return new TypeMembersResult(SymbolFormatter.ToDto(type, snapshot), members.Count, members.Take(maxResults).ToList(), members.Count > maxResults, unresolved);
     }
-
-    /// <summary>
-    /// A base type by its name as written (<c>Ns.Base&lt;T&gt;</c>): a workspace type with that name and arity,
-    /// preferring one in the namespace of <paramref name="derived"/> or an enclosing one.
-    /// </summary>
-    internal static CodeSymbol? FindBaseType(SymbolIndex index, CodeSymbol derived, string written)
-    {
-        var withoutArguments = GenericArguments().Replace(written, "");
-        var arity = CountTypeArguments(written);
-        var name = withoutArguments.Replace("global::", "").Trim().TrimEnd('?');
-        var candidates = index.Search(name, exact: true)
-            .Where(c => c.Kind.IsType() && c.TypeParameters.Count == arity && c != derived)
-            .ToList();
-        if (candidates.Count <= 1)
-        {
-            return candidates.FirstOrDefault();
-        }
-
-        // The closest namespace: the one sharing the longest prefix with the derived type's
-        return candidates
-            .OrderByDescending(c => CommonPrefixLength(c.Namespace ?? "", derived.Namespace ?? ""))
-            .ThenBy(c => c.Id, StringComparer.Ordinal)
-            .First();
-    }
-
-    private static int CountTypeArguments(string written)
-    {
-        var open = written.LastIndexOf('<');
-        if (open < 0)
-        {
-            return 0;
-        }
-
-        // Count top-level commas of the last argument list
-        var depth = 0;
-        var count = 1;
-        for (var i = open + 1; i < written.Length; i++)
-        {
-            switch (written[i])
-            {
-                case '<' or '(' or '[':
-                    depth++;
-                    break;
-                case '>' or ')' or ']' when depth > 0:
-                    depth--;
-                    break;
-                case ',' when depth == 0:
-                    count++;
-                    break;
-            }
-        }
-
-        return count;
-    }
-
-    private static int CommonPrefixLength(string a, string b)
-    {
-        var aParts = a.Split('.');
-        var bParts = b.Split('.');
-        var i = 0;
-        while (i < aParts.Length && i < bParts.Length && aParts[i] == bParts[i])
-        {
-            i++;
-        }
-
-        return i;
-    }
-
-    [GeneratedRegex(@"<[^<>]*(?:<[^<>]*(?:<[^<>]*>[^<>]*)*>[^<>]*)*>")]
-    private static partial Regex GenericArguments();
 
     [McpServerTool(Name = "file_outline", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "File outline")]
     [Description("The declarations of a file in source order (namespaces, types, members, enum members) with ids, lines and nesting depth, plus the number of syntax errors in the file.")]
@@ -274,7 +236,7 @@ public sealed partial class NavigationTools
         return new FileOutlineResult(document.Path, document.Project, document.Errors.Count + (document.Failure is null ? 0 : 1), items);
     }
 
-    private static (CodeSymbol? Symbol, AmbiguousSymbol? Ambiguous) Resolve(WorkspaceSnapshot snapshot, string symbol)
+    internal static (CodeSymbol? Symbol, AmbiguousSymbol? Ambiguous) Resolve(WorkspaceSnapshot snapshot, string symbol)
     {
         var resolution = SymbolResolver.Resolve(snapshot, symbol);
         if (resolution.Symbol is { } resolved)

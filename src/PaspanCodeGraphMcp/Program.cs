@@ -42,7 +42,8 @@ builder.Services
         }
     }))
     .WithTools<WorkspaceTools>()
-    .WithTools<NavigationTools>();
+    .WithTools<NavigationTools>()
+    .WithTools<HierarchyTools>();
 
 await builder.Build().RunAsync();
 

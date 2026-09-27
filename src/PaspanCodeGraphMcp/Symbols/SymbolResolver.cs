@@ -89,7 +89,10 @@ public static class SymbolResolver
         return builder.ToString();
     }
 
-    /// <summary>The declaration whose name is at the position; else the innermost declaration containing it.</summary>
+    /// <summary>
+    /// The declaration whose name is at the position; else the type a reference there names; else the innermost
+    /// declaration containing it.
+    /// </summary>
     private static Resolution ResolvePosition(WorkspaceSnapshot snapshot, SymbolRef.Position position)
     {
         var document = snapshot.FindDocument(position.FilePath)
@@ -107,6 +110,11 @@ public static class SymbolResolver
         if (onName != null)
         {
             return new Resolution(onName, [onName]);
+        }
+
+        if (snapshot.Index.ReferenceAt(document.Path, position.Line, position.Column) is { } reference)
+        {
+            return new Resolution(reference.Target, [reference.Target]);
         }
 
         var offset = document.Lines.GetOffset(position.Line, Math.Max(1, position.Column));

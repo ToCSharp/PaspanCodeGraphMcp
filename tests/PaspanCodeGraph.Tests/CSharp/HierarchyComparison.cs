@@ -85,7 +85,7 @@ internal static class HierarchyComparison
         {
             var overridden = symbol switch
             {
-                IMethodSymbol m => (ISymbol?)m.OverriddenMethod,
+                IMethodSymbol m => (ISymbol)m.OverriddenMethod,
                 IPropertySymbol p => p.OverriddenProperty,
                 IEventSymbol e => e.OverriddenEvent,
                 _ => null,

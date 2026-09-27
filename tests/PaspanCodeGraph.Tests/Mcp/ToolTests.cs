@@ -28,7 +28,7 @@ public sealed class ToolTests
         var report = await WorkspaceTools.Load(_host, _workspace.PathOf("Sample.slnx"));
 
         CollectionAssert.AreEquivalent(new[] { "App", "Lib" }, report.Projects.Select(p => p.Name).ToArray());
-        Assert.AreEqual(4, report.Documents);
+        Assert.AreEqual(5, report.Documents);
         Assert.AreEqual(1, report.FilesWithParseErrors);
         CollectionAssert.Contains(report.Projects.Single(p => p.Name == "App").ProjectReferences.ToArray(), "Lib");
 
@@ -149,13 +149,91 @@ public sealed class ToolTests
     }
 
     [TestMethod]
+    public async Task GoToDefinition_OnTypeReference_GoesToTheType()
+    {
+        // "public sealed class JsonParser : Parser, System.IDisposable" is line 5 of App/JsonParser.cs
+        var result = (DefinitionResult)await NavigationTools.GoToDefinition(_host, "App/JsonParser.cs:5:36");
+        Assert.AreEqual("T:Lib.Parser", result.Symbol.Id);
+    }
+
+    [TestMethod]
+    public async Task SymbolInfo_HasRelations()
+    {
+        var type = (SymbolInfoResult)await NavigationTools.SymbolInfo(_host, "T:App.JsonParser");
+        Assert.AreEqual("T:Lib.Parser", type.Relations.BaseType);
+        CollectionAssert.AreEqual(new[] { "System.IDisposable" }, type.Relations.Interfaces.ToArray());
+
+        var member = (SymbolInfoResult)await NavigationTools.SymbolInfo(_host, "M:Lib.Tokenizer.Next");
+        CollectionAssert.AreEqual(new[] { "M:Lib.ITokenizer.Next" }, member.Relations.Implements.ToArray());
+        Assert.AreEqual(1, member.Relations.Implementations, "only WordTokenizer.Next overrides it directly");
+
+        var overriding = (SymbolInfoResult)await NavigationTools.SymbolInfo(_host, "M:Lib.WordTokenizer.Next");
+        Assert.AreEqual("M:Lib.Tokenizer.Next", overriding.Relations.Overrides);
+
+        var parser = (SymbolInfoResult)await NavigationTools.SymbolInfo(_host, "T:Lib.Parser");
+        Assert.AreEqual(1, parser.Relations.DerivedTypes);
+        Assert.AreEqual(1, parser.Relations.References);
+    }
+
+    [TestMethod]
+    public async Task TypeHierarchy_BasesInterfacesAndDerived()
+    {
+        var direct = (TypeHierarchyResult)await HierarchyTools.TypeHierarchy(_host, "JsonTokenizer");
+        CollectionAssert.AreEqual(new[] { "T:Lib.WordTokenizer" }, direct.BaseTypes.Select(b => b.Symbol.Id).ToArray());
+        CollectionAssert.AreEqual(new[] { "T:Lib.ITokenizer" }, direct.Interfaces.Select(b => b.Symbol.Id).ToArray());
+
+        var chain = (TypeHierarchyResult)await HierarchyTools.TypeHierarchy(_host, "T:App.JsonTokenizer", transitive: true);
+        CollectionAssert.AreEqual(new[] { "T:Lib.WordTokenizer", "T:Lib.Tokenizer" }, chain.BaseTypes.Select(b => b.Symbol.Id).ToArray());
+
+        var derived = (TypeHierarchyResult)await HierarchyTools.TypeHierarchy(_host, "ITokenizer", transitive: true);
+        CollectionAssert.AreEqual(
+            new[] { "T:App.JsonTokenizer:1", "T:Lib.Tokenizer:1", "T:Lib.WordTokenizer:2" },
+            derived.Derived.Select(d => $"{d.Symbol.Id}:{d.Depth}").ToArray());
+
+        var truncated = (TypeHierarchyResult)await HierarchyTools.TypeHierarchy(_host, "ITokenizer", transitive: true, maxDerived: 1);
+        Assert.AreEqual(1, truncated.Derived.Count);
+        Assert.IsTrue(truncated.DerivedTruncated);
+    }
+
+    [TestMethod]
+    public async Task FindImplementations_OfInterfaceMemberAndType()
+    {
+        var member = (FindImplementationsResult)await HierarchyTools.FindImplementations(_host, "M:Lib.ITokenizer.Next");
+        CollectionAssert.AreEqual(
+            new[] { "implements M:App.JsonTokenizer.Lib#ITokenizer#Next", "implements M:Lib.Tokenizer.Next", "overrides M:App.JsonTokenizer.Next", "overrides M:Lib.WordTokenizer.Next" },
+            member.Items.Select(i => $"{i.Relation} {i.Symbol.Id}").Order().ToArray());
+
+        var type = (FindImplementationsResult)await HierarchyTools.FindImplementations(_host, "ITokenizer");
+        CollectionAssert.AreEquivalent(new[] { "T:App.JsonTokenizer", "T:Lib.Tokenizer", "T:Lib.WordTokenizer" }, type.Items.Select(i => i.Symbol.Id).ToArray());
+        Assert.IsTrue(type.Items.All(i => i.Relation == "implements"));
+    }
+
+    [TestMethod]
+    public async Task FindReferences_OfType_GroupedByFile()
+    {
+        var result = (FindReferencesResult)await HierarchyTools.FindReferences(_host, "T:Lib.Tokenizer");
+        Assert.AreEqual(2, result.Total);
+        CollectionAssert.AreEquivalent(new[] { "JsonParser.cs", "Tokens.cs" }, result.Files.Select(f => Path.GetFileName(f.File)).ToArray());
+        var inApp = result.Files.Single(f => f.File.EndsWith("JsonParser.cs", StringComparison.Ordinal)).Items.Single();
+        Assert.AreEqual("public static Tokenizer Create() => new WordTokenizer();", inApp.LineText);
+        Assert.AreEqual("M:App.JsonTokenizer.Create", inApp.InMember);
+        Assert.AreEqual("Exact", inApp.Confidence);
+
+        var page = (FindReferencesResult)await HierarchyTools.FindReferences(_host, "T:Lib.Tokenizer", maxResults: 1, offset: 1);
+        Assert.AreEqual(1, page.Returned);
+        Assert.IsFalse(page.Truncated);
+
+        await Assert.ThrowsExactlyAsync<ArgumentException>(() => HierarchyTools.FindReferences(_host, "M:Lib.Tokenizer.Next"));
+    }
+
+    [TestMethod]
     public async Task UnknownFile_IsAnError()
     {
         await Assert.ThrowsExactlyAsync<FileNotFoundException>(() => NavigationTools.FileOutline(_host, "Missing.cs"));
     }
 }
 
-/// <summary>Two projects, a partial class, inheritance across projects and a file with a syntax error.</summary>
+/// <summary>Two projects, a partial class, inheritance and interface implementations across projects, and a file with a syntax error.</summary>
 internal static class SampleWorkspace
 {
     public static TempWorkspace Create()
@@ -227,6 +305,24 @@ internal static class SampleWorkspace
             {
                 public object ParseJson(string json) => null;
             }
+
+            public sealed class JsonTokenizer : WordTokenizer, ITokenizer
+            {
+                public override int Next() => 2;
+
+                int ITokenizer.Next() => 3;
+
+                public static Tokenizer Create() => new WordTokenizer();
+            }
+            """);
+        workspace.Write("Lib/Tokens.cs", """
+            namespace Lib;
+
+            public interface ITokenizer { int Next(); }
+
+            public abstract class Tokenizer : ITokenizer { public abstract int Next(); }
+
+            public class WordTokenizer : Tokenizer { public override int Next() => 1; }
             """);
         return workspace;
     }

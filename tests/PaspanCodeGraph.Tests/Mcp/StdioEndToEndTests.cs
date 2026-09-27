@@ -25,7 +25,7 @@ public sealed class StdioEndToEndTests
 
         var tools = await client.ListToolsAsync();
         CollectionAssert.IsSubsetOf(
-            new[] { "workspace_load", "workspace_status", "diagnostics", "find_symbol", "symbol_info", "go_to_definition", "type_members", "file_outline" },
+            new[] { "workspace_load", "workspace_status", "diagnostics", "find_symbol", "symbol_info", "go_to_definition", "type_members", "file_outline", "type_hierarchy", "find_implementations", "find_references" },
             tools.Select(t => t.Name).ToArray());
 
         // The first call waits for the load started from the command line
