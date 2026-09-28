@@ -1060,7 +1060,7 @@ public sealed partial class CSharpSymbolCollector
             }
 
             var receiver = type == context.Type && _thisType is NamedType ? _thisType : _binder.SelfType(type);
-            var found = _binder.LookupMembers(receiver, text);
+            var found = _binder.LookupMembers(receiver, text, arity);
             if (found.Count > 0)
             {
                 return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods);
@@ -1069,7 +1069,7 @@ public sealed partial class CSharpSymbolCollector
 
         foreach (var staticType in _binder.StaticImports(context))
         {
-            var found = _binder.LookupMembers(_binder.SelfType(staticType), text);
+            var found = _binder.LookupMembers(_binder.SelfType(staticType), text, arity);
             if (found.Count > 0)
             {
                 return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods);
@@ -1142,7 +1142,7 @@ public sealed partial class CSharpSymbolCollector
                 {
                     if (_binder.FindNestedType(staticSymbol.Symbol, name, arity) == null)
                     {
-                        var found = _binder.LookupMembers(staticType, name);
+                        var found = _binder.LookupMembers(staticType, name, arity);
                         if (found.Count > 0)
                         {
                             callee = (target, null, true);
@@ -1192,7 +1192,7 @@ public sealed partial class CSharpSymbolCollector
             default:
             {
                 var receiver = target.Type;
-                var found = _binder.LookupMembers(receiver, name);
+                var found = _binder.LookupMembers(receiver, name, arity);
                 if (found.Count > 0)
                 {
                     var bound = BindFoundMembers(found, name, nameStart, nameEnd, inMember, target.Exact, invoked, out var methods);

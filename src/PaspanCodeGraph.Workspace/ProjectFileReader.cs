@@ -63,9 +63,22 @@ public sealed partial class ProjectFileReader
     private readonly HashSet<string> _imported = new(SymbolIndexBuilder.PathComparer);
     private readonly string _projectPath;
 
-    private ProjectFileReader(string projectPath, string configuration, string platform)
+    /// <summary>Properties set from outside the project, which its own assignments do not change.</summary>
+    private readonly HashSet<string> _global = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Set when the framework was taken from <c>TargetFrameworks</c> after the evaluation.</summary>
+    private bool _frameworkChosenLate;
+
+    private ProjectFileReader(string projectPath, string configuration, string platform, string? targetFramework = null)
     {
         _projectPath = projectPath;
+        if (targetFramework != null)
+        {
+            // As in the inner build of a multi-targeting project
+            _properties["TargetFramework"] = targetFramework;
+            _global.Add("TargetFramework");
+        }
+
         var directory = Path.GetDirectoryName(projectPath)!;
         _properties["Configuration"] = configuration;
         _properties["Platform"] = platform;
@@ -80,7 +93,14 @@ public sealed partial class ProjectFileReader
     public static ProjectModel Read(string projectPath, string configuration = "Debug", string platform = "AnyCPU")
     {
         projectPath = Path.GetFullPath(projectPath);
-        return new ProjectFileReader(projectPath, configuration, platform).Evaluate();
+        var reader = new ProjectFileReader(projectPath, configuration, platform);
+        var model = reader.Evaluate();
+
+        // A multi-targeting project is built once per framework with TargetFramework set from the start, so
+        // that conditions on it (DefineConstants per framework) hold: evaluate again for the framework chosen
+        return reader._frameworkChosenLate && model.TargetFramework.Length != 0
+            ? new ProjectFileReader(projectPath, configuration, platform, model.TargetFramework).Evaluate()
+            : model;
     }
 
     private ProjectModel Evaluate()
@@ -115,8 +135,7 @@ public sealed partial class ProjectFileReader
             targetFramework = Expand("$(TargetFrameworks)").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
             if (targetFramework.Length != 0)
             {
-                // The rest of the project may depend on the framework chosen for the build
-                _properties["TargetFramework"] = targetFramework;
+                _frameworkChosenLate = true;
             }
         }
 
@@ -173,7 +192,10 @@ public sealed partial class ProjectFileReader
                 case "PropertyGroup":
                     foreach (var property in element.Elements().Where(IsTrue))
                     {
-                        _properties[property.Name.LocalName] = Expand(property.Value.Trim());
+                        if (!_global.Contains(property.Name.LocalName))
+                        {
+                            _properties[property.Name.LocalName] = Expand(property.Value.Trim());
+                        }
                     }
 
                     break;
@@ -621,6 +643,21 @@ public sealed partial class ProjectFileReader
 
     private string PropertyFunction(string call)
     {
+        var framework = FrameworkFunction().Match(call);
+        if (framework.Success)
+        {
+            var arguments = SplitArguments(framework.Groups["arguments"].Value).Select(a => Expand(Unquote(a.Trim()))).ToList();
+            return framework.Groups["function"].Value.ToLowerInvariant() switch
+            {
+                "istargetframeworkcompatible" when arguments.Count == 2 => IsTargetFrameworkCompatible(arguments[0], arguments[1]) ? "True" : "False",
+                "gettargetframeworkidentifier" when arguments.Count >= 1 => ParseTargetFramework(arguments[0])?.Identifier ?? "",
+                "gettargetframeworkversion" when arguments.Count >= 1 => ParseTargetFramework(arguments[0]) is { } parsed
+                    ? parsed.Version.ToString(arguments.Count > 1 && int.TryParse(arguments[1], out var digits) ? Math.Clamp(digits, 1, 4) : 2)
+                    : "",
+                _ => "",
+            };
+        }
+
         var match = FileAboveFunction.Match(call);
         if (!match.Success)
         {
@@ -632,6 +669,111 @@ public sealed partial class ProjectFileReader
         var directory = Path.GetFullPath(Path.Combine(_properties["MSBuildProjectDirectory"], SolutionDiscovery.NormalizeSeparators(from)));
         var found = FindFileAbove(directory, file);
         return found == null ? "" : match.Groups["function"].Value == "GetPathOfFileAbove" ? found : Path.GetDirectoryName(found)!;
+    }
+
+    [GeneratedRegex(@"^\[MSBuild\]::(?<function>IsTargetFrameworkCompatible|GetTargetFrameworkIdentifier|GetTargetFrameworkVersion)\((?<arguments>.*)\)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex FrameworkFunction();
+
+    /// <summary>Splits the arguments of a property function at commas outside quotes and parentheses.</summary>
+    private static List<string> SplitArguments(string arguments)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var inQuote = false;
+        var start = 0;
+        for (var i = 0; i < arguments.Length; i++)
+        {
+            switch (arguments[i])
+            {
+                case '\'':
+                    inQuote = !inQuote;
+                    break;
+                case '(' when !inQuote:
+                    depth++;
+                    break;
+                case ')' when !inQuote:
+                    depth--;
+                    break;
+                case ',' when !inQuote && depth == 0:
+                    parts.Add(arguments[start..i]);
+                    start = i + 1;
+                    break;
+            }
+        }
+
+        parts.Add(arguments[start..]);
+        return parts;
+    }
+
+    /// <summary>
+    /// <c>net8.0</c> → (.NETCoreApp, 8.0), <c>netcoreapp3.1</c> → (.NETCoreApp, 3.1), <c>netstandard2.0</c> →
+    /// (.NETStandard, 2.0), <c>net472</c> → (.NETFramework, 4.7.2); the platform (<c>-windows</c>) is ignored.
+    /// </summary>
+    internal static (string Identifier, Version Version)? ParseTargetFramework(string targetFramework)
+    {
+        var framework = targetFramework.Trim().ToLowerInvariant();
+        if (framework.IndexOf('-') is var dash and >= 0)
+        {
+            framework = framework[..dash];
+        }
+
+        var match = TargetFrameworkName().Match(framework);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var name = match.Groups["name"].Value;
+        var version = match.Groups["version"].Value;
+        if (name == "net" && !version.Contains('.'))
+        {
+            // .NET Framework: net48, net472, net20
+            return version.Length is >= 2 and <= 3 && version.All(char.IsDigit)
+                ? (".NETFramework", new Version(string.Join('.', version.Select(c => c.ToString())) + (version.Length == 2 ? ".0" : "")))
+                : null;
+        }
+
+        if (!Version.TryParse(version.Contains('.') ? version : version + ".0", out var parsed))
+        {
+            return null;
+        }
+
+        return (name == "netstandard" ? ".NETStandard" : ".NETCoreApp", parsed);
+    }
+
+    /// <summary>
+    /// Whether a project for <paramref name="candidate"/> can reference one for <paramref name="target"/>, as
+    /// <c>$([MSBuild]::IsTargetFrameworkCompatible(...))</c> answers for the common frameworks.
+    /// </summary>
+    internal static bool IsTargetFrameworkCompatible(string candidate, string target)
+    {
+        if (ParseTargetFramework(candidate) is not { } from || ParseTargetFramework(target) is not { } to)
+        {
+            return false;
+        }
+
+        if (from.Identifier == to.Identifier)
+        {
+            return from.Version >= to.Version;
+        }
+
+        if (to.Identifier != ".NETStandard")
+        {
+            return false;
+        }
+
+        // The highest .NET Standard each framework implements
+        var standard = from.Identifier switch
+        {
+            ".NETCoreApp" => from.Version >= new Version(3, 0) ? new Version(2, 1) : from.Version >= new Version(2, 0) ? new Version(2, 0) : new Version(1, 6),
+            ".NETFramework" => from.Version >= new Version(4, 6, 1) ? new Version(2, 0)
+                : from.Version >= new Version(4, 6) ? new Version(1, 3)
+                : from.Version >= new Version(4, 5, 1) ? new Version(1, 2)
+                : from.Version >= new Version(4, 5) ? new Version(1, 1)
+                : null,
+            _ => null,
+        };
+        return standard != null && standard >= to.Version;
     }
 
     /// <summary>GetPathOfFileAbove(file, from) and GetDirectoryNameOfFileAbove(from, file).</summary>
@@ -720,6 +862,13 @@ public sealed partial class ProjectFileReader
             return (comparison.Groups["op"].Value == "==" ? equal : !equal) != negate;
         }
 
+        if (SplitComparison(term) is var (leftSide, op, rightSide))
+        {
+            // A side holding a quoted property function: '$([MSBuild]::GetTargetFrameworkIdentifier('$(TargetFramework)'))'
+            var equal = string.Equals(Expand(Unquote(leftSide)), Expand(Unquote(rightSide)), StringComparison.OrdinalIgnoreCase);
+            return (op == "==" ? equal : !equal) != negate;
+        }
+
         var literal = Unquote(term);
         if (bool.TryParse(Expand(literal), out var value))
         {
@@ -727,6 +876,30 @@ public sealed partial class ProjectFileReader
         }
 
         throw new FormatException($"Unsupported condition: {term}");
+    }
+
+    /// <summary>Splits <c>left == right</c> at the operator outside parentheses.</summary>
+    private static (string Left, string Op, string Right)? SplitComparison(string term)
+    {
+        var depth = 0;
+        for (var i = 0; i + 1 < term.Length; i++)
+        {
+            var c = term[i];
+            if (c == '(')
+            {
+                depth++;
+            }
+            else if (c == ')')
+            {
+                depth--;
+            }
+            else if (depth == 0 && c is '=' or '!' && term[i + 1] == '=')
+            {
+                return (term[..i].Trim(), term.Substring(i, 2), term[(i + 2)..].Trim());
+            }
+        }
+
+        return null;
     }
 
     private static string Unquote(string value) => value.Length >= 2 && value[0] == '\'' && value[^1] == '\'' ? value[1..^1] : value;

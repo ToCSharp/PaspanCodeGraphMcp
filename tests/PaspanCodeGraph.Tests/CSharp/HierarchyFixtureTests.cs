@@ -176,6 +176,18 @@ public sealed class HierarchyFixtureTests
                 public static IEnumerable<TOut> Map<TIn, TOut>(this IEnumerable<TIn> items, Func<TIn, TOut> f) => items.Select(f);
                 public static bool IsBig(this Shape shape) => shape.Area > 10;
                 public static string Join(string separator, params string[] parts) => string.Join(separator, parts);
+                public static T? Value<T>(this Token token) => (T?)token.Value;
+            }
+
+            public class Token
+            {
+                public object? Value { get; set; }
+                public static Token Parse(string text) => new Token { Value = text };
+            }
+
+            public sealed class Leaf : Token
+            {
+                public new static Leaf Parse(string text) => new Leaf { Value = text };
             }
 
             public record Point(int X, int Y)
@@ -246,6 +258,9 @@ public sealed class HierarchyFixtureTests
                     int Local(int v) => v + Seed;
                     Func<int, int> twice = Twice;
                     var text = new StringBuilder().Append(Join(",", "a", "b")).ToString();
+                    var leaf = Leaf.Parse("x");
+                    total += leaf.Value<string>()?.Length ?? 0;
+                    total += Token.Parse("y").Value is string ? 1 : 0;
                     return Local(total) + twice(1) + text.Length + names.Count + nameof(Run).Length;
                 }
             }
