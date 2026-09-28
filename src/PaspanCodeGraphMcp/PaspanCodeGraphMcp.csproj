@@ -6,9 +6,28 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>paspan-code-graph-mcp</ToolCommandName>
     <PackageId>PaspanCodeGraphMcp</PackageId>
+    <!-- Keep in step with .mcp/server.json (checked by PackagingTests) -->
     <Version>0.1.0</Version>
-    <Description>Read-only MCP server for C# code analysis by AI agents, powered by PaspanParsers: symbols, outlines and declarations without Roslyn or MSBuild.</Description>
+    <Description>Read-only MCP server for C# code analysis by AI agents: declarations, type hierarchy, references, call graph and GraphRAG retrieval (search, context within a token budget, impact of a change), built with PaspanParsers instead of Roslyn and without MSBuild.</Description>
+    <Authors>ToCSharp</Authors>
+    <PackageTags>mcp;mcp-server;csharp;code-graph;graphrag;call-graph;ai-agents;dotnet-tool</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/ToCSharp/PaspanCodeGraphMcp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ToCSharp/PaspanCodeGraphMcp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <!-- A dotnet tool that MCP clients can also find as an MCP server on NuGet (dnx PaspanCodeGraphMcp) -->
+    <PackageType>McpServer</PackageType>
+    <!-- Also a single NativeAOT binary: dotnet publish -c Release -r <rid> -p:PublishAot=true -->
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- The reference pass walks syntax nodes through their public properties -->
+    <TrimmerRootAssembly Include="PaspanParsers" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include=".mcp\server.json" Pack="true" PackagePath=".mcp" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />

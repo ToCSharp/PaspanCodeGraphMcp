@@ -362,9 +362,10 @@ public sealed partial class CSharpBinder
     /// <summary>
     /// The members named <paramref name="name"/> of a type and its base types, most derived first. A member that
     /// is not a method hides the ones further up; methods of all levels are candidates, except those overridden
-    /// by a member already found.
+    /// by a member already found. With type arguments (<c>x.Value&lt;string&gt;()</c>) only the methods with that
+    /// many type parameters are members, so a property of the name hides nothing.
     /// </summary>
-    public List<FoundMember> LookupMembers(SemType receiver, string name)
+    public List<FoundMember> LookupMembers(SemType receiver, string name, int arity = 0)
     {
         var found = new List<FoundMember>();
         var visited = new HashSet<CodeSymbol>();
@@ -418,7 +419,13 @@ public sealed partial class CSharpBinder
                         continue;
                     }
 
-                    if (found.Any(f => Overrides(f.Symbol, member)) || member.IsExternal && found.Any(f => SameSignatureOverride(f, member, map)))
+                    if (arity > 0 && (member.Kind != SymbolKind.Method || member.TypeParameters.Count != arity))
+                    {
+                        continue;
+                    }
+
+                    // Overridden, or hidden by a method with the same signature further down ('new')
+                    if (found.Any(f => Overrides(f.Symbol, member)) || found.Any(f => f.Symbol.ContainingType != member.ContainingType && SameSignature(f, member, map)))
                     {
                         continue;
                     }
@@ -487,12 +494,12 @@ public sealed partial class CSharpBinder
         p => !p.IsMethod && p.Ordinal >= 0 && p.Ordinal < arguments.Count && (p.Owner == null || IsInChain(p.Owner, type)) ? arguments[p.Ordinal] : null;
 
     /// <summary>
-    /// Whether a member already found overrides the external virtual member <paramref name="member"/>: an override
-    /// with the same parameter types (overrides of external members are not linked).
+    /// Whether a member already found, further down the hierarchy, has the parameter types of
+    /// <paramref name="member"/>: it overrides it (overrides of external members are not linked) or hides it.
     /// </summary>
-    private bool SameSignatureOverride(FoundMember found, CodeSymbol member, Func<TypeParameterType, SemType?> map)
+    private bool SameSignature(FoundMember found, CodeSymbol member, Func<TypeParameterType, SemType?> map)
     {
-        if (!found.Symbol.Modifiers.Contains("override") || found.Symbol.Kind != member.Kind || found.Symbol.TypeParameters.Count != member.TypeParameters.Count)
+        if (found.Symbol.Kind != member.Kind || found.Symbol.TypeParameters.Count != member.TypeParameters.Count)
         {
             return false;
         }

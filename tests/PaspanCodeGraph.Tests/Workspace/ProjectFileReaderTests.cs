@@ -142,6 +142,54 @@ public sealed class ProjectFileReaderTests
     }
 
     [TestMethod]
+    public void MultiTargeting_EvaluatesConditionsForTheFirstFramework()
+    {
+        using var workspace = new TempWorkspace();
+        var project = workspace.Write("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFrameworks>net10.0;net8.0;net45;netstandard2.0</TargetFrameworks>
+              </PropertyGroup>
+              <PropertyGroup Condition="'$(TargetFramework)'=='net8.0' or '$(TargetFramework)'=='net10.0'">
+                <DefineConstants>HAVE_ASYNC;$(AdditionalConstants)</DefineConstants>
+              </PropertyGroup>
+              <PropertyGroup Condition="'$(TargetFramework)'=='net45'">
+                <DefineConstants>NET45_ONLY</DefineConstants>
+              </PropertyGroup>
+              <PropertyGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net6.0'))">
+                <DefineConstants>$(DefineConstants);HAVE_MEMORY</DefineConstants>
+              </PropertyGroup>
+              <PropertyGroup Condition="'$([MSBuild]::GetTargetFrameworkIdentifier('$(TargetFramework)'))' == '.NETCoreApp'">
+                <DefineConstants>$(DefineConstants);CORE</DefineConstants>
+              </PropertyGroup>
+              <PropertyGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net11.0'))">
+                <DefineConstants>$(DefineConstants);TOO_NEW</DefineConstants>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        var model = ProjectFileReader.Read(project);
+
+        Assert.AreEqual("net10.0", model.TargetFramework);
+        CollectionAssert.IsSubsetOf(new[] { "HAVE_ASYNC", "HAVE_MEMORY", "CORE", "NET10_0" }, model.PreprocessorSymbols.ToArray());
+        CollectionAssert.DoesNotContain(model.PreprocessorSymbols.ToArray(), "NET45_ONLY");
+        CollectionAssert.DoesNotContain(model.PreprocessorSymbols.ToArray(), "TOO_NEW");
+    }
+
+    [TestMethod]
+    public void IsTargetFrameworkCompatible_FollowsNetStandard()
+    {
+        Assert.IsTrue(ProjectFileReader.IsTargetFrameworkCompatible("net8.0", "netstandard2.1"));
+        Assert.IsTrue(ProjectFileReader.IsTargetFrameworkCompatible("net472", "netstandard2.0"));
+        Assert.IsTrue(ProjectFileReader.IsTargetFrameworkCompatible("net48", "net45"));
+        Assert.IsTrue(ProjectFileReader.IsTargetFrameworkCompatible("net10.0-windows", "net6.0"));
+        Assert.IsFalse(ProjectFileReader.IsTargetFrameworkCompatible("net472", "netstandard2.1"));
+        Assert.IsFalse(ProjectFileReader.IsTargetFrameworkCompatible("netstandard2.0", "net6.0"));
+        Assert.IsFalse(ProjectFileReader.IsTargetFrameworkCompatible("net6.0", "net8.0"));
+        Assert.IsFalse(ProjectFileReader.IsTargetFrameworkCompatible("net48", "net6.0"));
+    }
+
+    [TestMethod]
     public void TargetFrameworkSymbols_ForOtherFrameworks()
     {
         CollectionAssert.AreEquivalent(
