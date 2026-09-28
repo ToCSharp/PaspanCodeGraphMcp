@@ -246,3 +246,7 @@ of the `PackageReference` items and their dependencies in the NuGet cache (with 
 - Test: `dotnet run --project tests/PaspanCodeGraph.Tests`
 
 PaspanParsers is a git submodule in `external/PaspanParsers`.
+
+## License
+
+BSD 3-Clause, see [LICENSE](LICENSE).
