@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>C++ front end of the code graph: turns PaspanParsers C++ syntax trees into symbols and references.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaspanCodeGraph.Core\PaspanCodeGraph.Core.csproj" />
+    <ProjectReference Include="..\..\external\PaspanParsers\src\PaspanParsers\PaspanParsers.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PaspanCodeGraph.Tests" />
+  </ItemGroup>
+</Project>

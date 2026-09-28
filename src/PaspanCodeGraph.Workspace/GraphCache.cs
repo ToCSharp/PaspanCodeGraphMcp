@@ -1,7 +1,9 @@
 using System.Reflection;
 using System.Text;
+using PaspanCodeGraph.Cpp;
 using PaspanCodeGraph.CSharp;
 using PaspanCodeGraph.Metadata;
+using PaspanParsers;
 using PaspanParsers.CSharp;
 
 namespace PaspanCodeGraph.Workspace;
@@ -17,15 +19,15 @@ public static class GraphCache
     private const string Magic = "PASPAN-GRAPH";
 
     /// <summary>Changes whenever the format changes.</summary>
-    private const int SchemaVersion = 1;
+    private const int SchemaVersion = 2;
 
     /// <summary>The builds of the assemblies that make the graph: a graph made by other code may differ.</summary>
     private static readonly string BuildStamp = string.Join(
         ',',
-        new[] { typeof(CodeSymbol), typeof(CSharpBinder), typeof(WorkspaceLoader), typeof(MetadataCatalog), typeof(CSharpParser), typeof(Paspan.ParseError), typeof(Paspan.Fluent.Parsers) }
+        new[] { typeof(CodeSymbol), typeof(CSharpBinder), typeof(CppBinder), typeof(WorkspaceLoader), typeof(MetadataCatalog), typeof(CSharpParser), typeof(Paspan.ParseError), typeof(Paspan.Fluent.Parsers) }
             .Select(t => t.Assembly.ManifestModule.ModuleVersionId));
 
-    public static string DefaultPath(string rootPath) => Path.Combine(Path.GetDirectoryName(Path.GetFullPath(rootPath))!, ".paspan", "graph.bin");
+    public static string DefaultPath(string rootPath) => Path.Combine(SolutionDiscovery.WorkspaceDirectory(rootPath), ".paspan", "graph.bin");
 
     /// <summary>Writes <paramref name="snapshot"/> to <paramref name="file"/>, replacing it at once when complete.</summary>
     public static void Save(WorkspaceSnapshot snapshot, string file)
@@ -94,6 +96,7 @@ public static class GraphCache
             S(snapshot.Platform);
             w.Write(snapshot.ReadReferences);
             S(snapshot.MetadataKey);
+            S(snapshot.CppParseKey);
 
             I(snapshot.ProjectPrints.Count);
             foreach (var (path, print) in snapshot.ProjectPrints)
@@ -116,6 +119,7 @@ public static class GraphCache
             {
                 S(document.Path);
                 S(document.Project);
+                I((int)document.Language);
                 S(document.Failure);
                 I(document.Errors.Count);
                 foreach (var error in document.Errors)
@@ -142,6 +146,18 @@ public static class GraphCache
                 var names = state?.Names ?? new HashSet<string>();
                 I(names.Count);
                 foreach (var name in names)
+                {
+                    S(name);
+                }
+
+                I(state?.CppMacros.Count ?? 0);
+                foreach (var macro in state?.CppMacros ?? [])
+                {
+                    S(macro);
+                }
+
+                I(state?.CppNames.Count ?? 0);
+                foreach (var name in state?.CppNames ?? [])
                 {
                     S(name);
                 }
@@ -216,6 +232,7 @@ public static class GraphCache
                 S(symbol.Namespace);
                 S(symbol.Project);
                 S(symbol.Assembly);
+                I((int)symbol.Language);
                 S(symbol.Accessibility);
                 Strings(symbol.Modifiers);
                 I(symbol.Declarations.Count);
@@ -317,6 +334,7 @@ public static class GraphCache
         }
 
         var metadataKey = N();
+        var cppParseKey = N();
         var prints = new Dictionary<string, string>(SymbolIndexBuilder.PathComparer);
         for (var count = I(); count > 0; count--)
         {
@@ -339,6 +357,7 @@ public static class GraphCache
         {
             var path = N();
             var project = N();
+            var language = (SourceLanguage)I();
             var failure = S();
             var errors = new List<SyntaxError>();
             for (var e = I(); e > 0; e--)
@@ -348,7 +367,7 @@ public static class GraphCache
                 errors.Add(new SyntaxError(new TextSpan(start, end), N()));
             }
 
-            documents[path] = new SourceDocument(path, project, ReadOnlyMemory<byte>.Empty, new LineMap([]), null, failure) { CachedErrors = errors };
+            documents[path] = new SourceDocument(path, project, ReadOnlyMemory<byte>.Empty, new LineMap([]), null, failure) { CachedErrors = errors, Language = language };
 
             var hash = N();
             var declarations = new List<DeclarationPrint>();
@@ -368,6 +387,18 @@ public static class GraphCache
                 names.Add(N());
             }
 
+            var macros = new List<string>();
+            for (var n = I(); n > 0; n--)
+            {
+                macros.Add(N());
+            }
+
+            var cppNames = new List<string>();
+            for (var n = I(); n > 0; n--)
+            {
+                cppNames.Add(N());
+            }
+
             var references = new List<(string, SymbolReference)>();
             for (var n = I(); n > 0; n--)
             {
@@ -380,7 +411,7 @@ public static class GraphCache
                 references.Add((target, new SymbolReference(file, start, line, column, inMember, (Confidence)I())));
             }
 
-            files[path] = new FileState { Hash = hash, Declarations = declarations, Names = names, References = references };
+            files[path] = new FileState { Hash = hash, Declarations = declarations, Names = names, References = references, CppMacros = macros, CppNames = cppNames };
             fileOrder.Add(path);
         }
 
@@ -436,6 +467,7 @@ public static class GraphCache
             symbol.Namespace = S();
             symbol.Project = S();
             symbol.Assembly = S();
+            symbol.Language = (SourceLanguage)I();
             symbol.Accessibility = N();
             Strings(symbol.Modifiers);
             for (var count = I(); count > 0; count--)
@@ -493,6 +525,7 @@ public static class GraphCache
             Files = files,
             ProjectPrints = prints,
             MetadataKey = metadataKey,
+            CppParseKey = cppParseKey,
             MetadataLoaded = false,
             MetadataProblems = metadataProblems,
             Kind = SnapshotKind.Cache,

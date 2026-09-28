@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
   "name": "io.github.ToCSharp/PaspanCodeGraphMcp",
-  "description": "Read-only C# code graph for AI agents: references, call graph, hierarchy and GraphRAG retrieval, without Roslyn or MSBuild.",
-  "version": "0.1.0",
+  "description": "Read-only C# and C++ code graph for AI agents: references, call graph, hierarchy and GraphRAG retrieval, without Roslyn, clang or MSBuild.",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/ToCSharp/PaspanCodeGraphMcp",
     "source": "github"
@@ -12,14 +12,14 @@
       "registryType": "nuget",
       "registryBaseUrl": "https://api.nuget.org",
       "identifier": "PaspanCodeGraphMcp",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       },
       "environmentVariables": [
         {
           "name": "PASPAN_WORKSPACE",
-          "description": "The .sln, .slnx, .csproj or directory to load at startup; without it, the agent calls workspace_load.",
+          "description": "The .sln, .slnx, .csproj, .vcxproj, compile_commands.json or directory (also of C++ sources) to load at startup; without it, the agent calls workspace_load.",
           "isRequired": false,
           "format": "string"
         },

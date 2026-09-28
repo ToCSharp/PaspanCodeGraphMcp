@@ -11,9 +11,13 @@ public sealed record ProblemDto(string Severity, string Message, string? File, i
         new(problem.Severity.ToString(), problem.Message, problem.File, problem.Line, problem.Column);
 }
 
+/// <param name="Language">CSharp or Cpp.</param>
+/// <param name="LanguageVersion">The C# language version, or the C++ standard.</param>
+/// <param name="PreprocessorSymbols">C#: the defined symbols; C++: the macros given to every file (-D options and the predefined ones).</param>
 public sealed record ProjectReport(
     string Name,
     string Path,
+    string Language,
     string TargetFramework,
     string LanguageVersion,
     int Documents,
@@ -73,10 +77,10 @@ public sealed record DiagnosticsResult(int Total, IReadOnlyDictionary<string, in
 public sealed class WorkspaceTools
 {
     [McpServerTool(Name = "workspace_load", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Load workspace")]
-    [Description("Load a .sln/.slnx/.csproj (replaces the current workspace). Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile items with wildcards, ProjectReference, PackageReference and FrameworkReference. The referenced assemblies (the SDK's reference packs, the packages of obj/project.assets.json or, without a restore, of the NuGet cache) are read with System.Reflection.Metadata so that their types and members bind. Every file is parsed by PaspanParsers with error recovery. The graph is kept in .paspan/graph.bin next to the solution, so a later load reads it and parses and binds again only what changed (unless the server runs with --no-cache). Returns per-project file and assembly counts, preprocessor symbols and the problems found.")]
+    [Description("Load a C# or C++ workspace (replaces the current one): a .sln/.slnx/.csproj; for C++ a .vcxproj (also in a solution), a compile_commands.json (CMake, Meson, Bear: the macros, include directories and standard of each file; the headers under the sources are added), or a directory of C++ sources. Project files are read without MSBuild: properties, simple conditions, Directory.Build.props, .projitems imports, Compile/ClCompile/ClInclude items with wildcards, ProjectReference, PackageReference and FrameworkReference, the ClCompile item definition of the configuration. The referenced assemblies of C# projects (the SDK's reference packs, the packages of obj/project.assets.json or, without a restore, of the NuGet cache) are read with System.Reflection.Metadata so that their types and members bind. Every file is parsed by PaspanParsers, C# with error recovery; C++ files are parsed without reading headers or expanding macros, with the names of types and templates of the whole workspace and of the standard library, and with the macros that only decorate declarations (FOO_API) blanked out; a C++ file that does not parse has no symbols (see diagnostics). The graph is kept in .paspan/graph.bin next to the solution (or in the directory), so a later load reads it and parses and binds again only what changed (unless the server runs with --no-cache). Returns per-project file and assembly counts, preprocessor symbols or macros and the problems found.")]
     public static async Task<LoadReport> Load(
         WorkspaceHost host,
-        [Description("Path to a .sln, .slnx, .csproj or a directory containing one. Defaults to the --workspace the server was started with.")] string? path = null,
+        [Description("Path to a .sln, .slnx, .csproj, .vcxproj or compile_commands.json, or a directory containing one (or containing C++ sources, or a build directory with compile_commands.json). Defaults to the --workspace the server was started with.")] string? path = null,
         [Description("MSBuild Configuration (default: server option, usually Debug)")] string? configuration = null,
         CancellationToken ct = default)
     {
@@ -103,11 +107,12 @@ public sealed class WorkspaceTools
             snapshot.Projects.Select(p => new ProjectReport(
                 p.Name,
                 p.Path,
+                p.Language.ToString(),
                 p.TargetFramework,
-                p.LanguageVersion.ToString(),
+                p.Language == PaspanCodeGraph.SourceLanguage.Cpp ? p.CppLanguageVersion.ToString() : p.LanguageVersion.ToString(),
                 documentsByProject.GetValueOrDefault(p.Name),
                 p.ProjectReferences.Select(r => Path.GetFileNameWithoutExtension(r)).ToList(),
-                p.PreprocessorSymbols,
+                p.Language == PaspanCodeGraph.SourceLanguage.Cpp ? p.Macros.Select(m => m.Value == "1" ? m.Key : $"{m.Key}={m.Value}").Order(StringComparer.Ordinal).ToList() : p.PreprocessorSymbols,
                 snapshot.References.GetValueOrDefault(p.Path)?.Count ?? 0)).ToList(),
             snapshot.Problems.Select(ProblemDto.From).ToList());
     }
@@ -139,7 +144,7 @@ public sealed class WorkspaceTools
     }
 
     [McpServerTool(Name = "diagnostics", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Load and parse problems")]
-    [Description("Problems of the loaded workspace: projects that could not be read and syntax errors found by the parser (there is no semantic analysis, so no type errors). Grouped counts plus the first N items, and how the member references of the whole workspace were bound (exact, inferred, name-only and their share, external, unresolved).")]
+    [Description("Problems of the loaded workspace: projects that could not be read, syntax errors found by the parser (there is no semantic analysis, so no type errors) and C++ files that could not be parsed (usually a macro used where the code expects a declaration or a type), with the position. Grouped counts plus the first N items, and how the member references of the whole workspace were bound (exact, inferred, name-only and their share, external, unresolved).")]
     public static async Task<DiagnosticsResult> Diagnostics(
         WorkspaceHost host,
         [Description("Project name filter (exact, case-insensitive)")] string? project = null,
@@ -172,7 +177,9 @@ public sealed class WorkspaceTools
 
             if (document.Failure is { } failure)
             {
-                all.Add(new DiagnosticDto("Error", "Parse", failure, document.Path, 0, 0, document.Project));
+                // ParseError's text ends with its position: "... at (12:5)"
+                var position = System.Text.RegularExpressions.Regex.Match(failure, @" at \((\d+):(\d+)\)$");
+                all.Add(new DiagnosticDto("Error", "Parse", failure, document.Path, position.Success ? int.Parse(position.Groups[1].Value) : 0, position.Success ? int.Parse(position.Groups[2].Value) : 0, document.Project));
             }
 
             foreach (var error in document.Errors)

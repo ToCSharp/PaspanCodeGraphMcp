@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/PaspanCodeGraph.Core/PaspanCodeGraph.Core.csproj" />
+    <Project Path="src/PaspanCodeGraph.Cpp/PaspanCodeGraph.Cpp.csproj" />
     <Project Path="src/PaspanCodeGraph.CSharp/PaspanCodeGraph.CSharp.csproj" />
     <Project Path="src/PaspanCodeGraph.Metadata/PaspanCodeGraph.Metadata.csproj" />
     <Project Path="src/PaspanCodeGraph.Search/PaspanCodeGraph.Search.csproj" />

@@ -7,12 +7,12 @@
     <ToolCommandName>paspan-code-graph-mcp</ToolCommandName>
     <PackageId>PaspanCodeGraphMcp</PackageId>
     <!-- Keep in step with .mcp/server.json (checked by PackagingTests) -->
-    <Version>0.1.0</Version>
-    <Description>Read-only MCP server for C# code analysis by AI agents: declarations, type hierarchy, references, call graph and GraphRAG retrieval (search, context within a token budget, impact of a change), built with PaspanParsers instead of Roslyn and without MSBuild.</Description>
+    <Version>0.2.0</Version>
+    <Description>Read-only MCP server for C# and C++ code analysis by AI agents: declarations, type hierarchy, references, call graph and GraphRAG retrieval (search, context within a token budget, impact of a change), built with PaspanParsers instead of Roslyn or clang and without MSBuild.</Description>
     <Authors>ToCSharp</Authors>
     <Copyright>Copyright (c) 2026, ToCSharp</Copyright>
     <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
-    <PackageTags>mcp;mcp-server;csharp;code-graph;graphrag;call-graph;ai-agents;dotnet-tool</PackageTags>
+    <PackageTags>mcp;mcp-server;csharp;cpp;c++;code-graph;graphrag;call-graph;ai-agents;dotnet-tool</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/ToCSharp/PaspanCodeGraphMcp</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ToCSharp/PaspanCodeGraphMcp</RepositoryUrl>

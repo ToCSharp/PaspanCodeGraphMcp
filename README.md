@@ -1,8 +1,8 @@
 # PaspanCodeGraphMcp
 A 100% managed C#, high-performance MCP server and GraphRAG engine powered by zero-allocation Span-based parser combinators for native codebase analysis by AI agents.
 
-The server reads C# code with [PaspanParsers](https://github.com/ToCSharp/PaspanParsers), not Roslyn, and loads
-solutions without MSBuild. It is read-only and talks MCP over stdio.
+The server reads C# and C++ code with [PaspanParsers](https://github.com/ToCSharp/PaspanParsers), not Roslyn or clang,
+and loads solutions without MSBuild. It is read-only and talks MCP over stdio.
 
 ## Status
 
@@ -14,6 +14,10 @@ updates the graph when files change, and keeps the graph on disk so that a resta
 On top of the graph, retrieval tools for agents (GraphRAG without an LLM in the server): search by words, context
 within a token budget, impact of a change, paths between symbols, a map of modules, and notes kept by the agent.
 It is packaged as a .NET tool and also builds as a single NativeAOT binary.
+
+C++ code is read the same way ([C++](#c)): a folder of sources, a `compile_commands.json` or `.vcxproj` projects,
+with the declarations of headers and source files merged, the class hierarchy, and references bound with C++ name
+lookup and the types of expressions; the same tools answer for both languages, in one graph when a solution has both.
 
 ## Installing
 
@@ -46,7 +50,9 @@ The binary gives the same answers as the tool: tool results are serialized from 
 ## Connecting a client
 
 The server speaks MCP over stdio. Give it the solution with `--workspace` (or let the agent call
-`workspace_load`); paths are best absolute.
+`workspace_load`); paths are best absolute. For C++, give it the directory of the sources, a `compile_commands.json`
+(or the directory of the sources when the database is in `build/`, `out/...` or `cmake-build-*/`), or a solution or
+`.vcxproj`.
 
 Claude Code:
 
@@ -99,12 +105,12 @@ The options:
 
 | Argument | Environment variable | Default |
 | --- | --- | --- |
-| `--workspace`, `-w` or the first argument: a .sln, .slnx, .csproj or a directory holding one | `PASPAN_WORKSPACE` | none: call `workspace_load` |
+| `--workspace`, `-w` or the first argument: a .sln, .slnx, .csproj, .vcxproj or compile_commands.json, or a directory holding one (or C++ sources) | `PASPAN_WORKSPACE` | none: call `workspace_load` |
 | `--configuration`, `-c` | `PASPAN_CONFIGURATION` | `Debug` |
 | `--platform`, `-p` | `PASPAN_PLATFORM` | `AnyCPU` |
 | `--no-watch`: do not watch the files | `PASPAN_WATCH=0` | watch |
 | `--no-cache`: do not keep the graph on disk | `PASPAN_CACHE=0` | keep it |
-| `--cache <file>`: where to keep the graph | `PASPAN_CACHE_PATH` | `.paspan/graph.bin` next to the solution |
+| `--cache <file>`: where to keep the graph | `PASPAN_CACHE_PATH` | `.paspan/graph.bin` next to the solution (in the directory of a C++ folder or of the sources of a compilation database) |
 | | `PASPAN_LOG_LEVEL` | `Information` (logs go to stderr) |
 | `--help`, `--version` | | |
 
@@ -112,10 +118,10 @@ The options:
 
 | Tool | What it returns |
 | --- | --- |
-| `workspace_load` | Loads a solution or project; per-project file and referenced assembly counts, preprocessor symbols and load problems |
+| `workspace_load` | Loads a solution or project, or a C++ folder or compilation database; per-project language, file and referenced assembly counts, preprocessor symbols or macros and load problems |
 | `workspace_status` | What is loaded, counts (with referenced assemblies and their types), load time, how the last change was applied (files parsed and bound again), whether files are watched, how the graph cache was used, memory |
-| `diagnostics` | Projects that could not be read and syntax errors, with positions; how member references were bound (exact, inferred, name-only share, external, unresolved) |
-| `find_symbol` | Declarations by (dotted) name: substring, exact or `*`/`?` wildcards |
+| `diagnostics` | Projects that could not be read, syntax errors and C++ files that could not be parsed, with positions; how member references were bound (exact, inferred, name-only share, external, unresolved) |
+| `find_symbol` | Declarations by (dotted, or for C++ `::`-qualified) name: substring, exact or `*`/`?` wildcards |
 | `symbol_info` | Signature, documentation summary, accessibility, modifiers, parameters, all declarations, and relations: base class, interfaces, overridden and implemented members, counts of derived types, implementations and references |
 | `go_to_definition` | Declaration locations, every part of a partial type; a position on a type reference goes to that type |
 | `type_members` | Members of a type, optionally with those of its base types and interfaces declared in the workspace |
@@ -132,8 +138,9 @@ The options:
 | `module_map` | Projects with references and namespaces, communities of types (Louvain over the reference graph) with their links, and entry points |
 | `annotate` | Keeps a note on a symbol, namespace or project (in `.paspan/annotations.json`); search, context and module map answers carry it |
 
-Symbols are named by documentation-comment ids (``T:Ns.Type`1``, `M:Ns.Type.Parse(System.String)`), by a position
-(`src/File.cs:12:17`) or by a dotted name; a name that matches several declarations returns the candidates.
+Symbols are named by documentation-comment ids (``T:Ns.Type`1``, `M:Ns.Type.Parse(System.String)`, for C++
+`M:geo::Circle::area()const`), by a position (`src/File.cs:12:17`, `src/circle.cpp:16:16`) or by a dotted or
+`::`-qualified name; a name that matches several declarations returns the candidates.
 Ids are the ones in XML documentation comments. Type names in ids are bound, so workspace types and types from
 referenced assemblies are written with their full names (`System.Collections.Generic.List{System.Int32}`), as
 Roslyn writes them; a type whose assembly was not found stays as written in the source. Ids from Roslyn's
@@ -177,6 +184,68 @@ For member references, exact and inferred ones reach a recall of 98.3% and a pre
 share of name-only member references of this repository from 19% to 4.5%, and the calls that could not be bound
 at all from 444 to 4; loading it takes about 1.3 s instead of 0.6 s. The ids of every public type and member of
 `System.Runtime`, `System.Collections`, `System.Linq` and `System.Collections.Immutable` match Roslyn's.
+
+## C++
+
+A C++ workspace is a folder of sources (every C++ file under it, skipping hidden and build directories), a
+compilation database (`compile_commands.json`, written by CMake with `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`, Meson,
+Bear and others: the files it lists with the macros, include directories and standard of each, and the headers under
+the directory of the sources), or `.vcxproj` projects, alone or in a solution with C# projects (their `ClCompile`
+and `ClInclude` items and the `ClCompile` item definition of the configuration: `PreprocessorDefinitions`,
+`AdditionalIncludeDirectories`, `LanguageStandard`). Files are parsed with the macros of a compiler for the
+configuration (clang on Linux, or MSVC for `.vcxproj` projects and `cl` commands, with the language's feature-test
+macros) and the system's include directories for `__has_include`.
+
+The parser reads one file at a time and does not expand macros, so each file is prepared first:
+
+- Every `#define` of the workspace is read. Macros that only decorate declarations (`FMT_API`, `LLVM_ABI`:
+  attributes, `__declspec`, `inline`, ...) or are defined as nothing in some configuration are blanked out, with
+  spaces, so that positions do not move; so are the uses of function-like macros of that kind with their arguments.
+  Object-like macros that stand for syntax (`FMT_BEGIN_NAMESPACE` for `namespace fmt { inline namespace v12 {`) are
+  expanded, and positions in the expansion are mapped back to the macro's name. A file that still does not parse is
+  parsed again with the function-like macros that stand for syntax expanded too (`FMT_ENABLE_IF(...)`).
+- Each file is given the macros that the workspace headers it includes define, transitively, for its conditional
+  directives (the first definition of a macro counts).
+- A first parse of every file finds the types, class and alias templates, function templates and concepts it
+  declares; the second parse is given all of them and those of the standard library as the names of headers, so
+  that `Widget(x)` is a cast and `get<0>(t)` a call.
+
+A file that cannot be parsed has no symbols; `diagnostics` gives the position where the parser stopped (usually a
+macro that stands for a declaration, such as Google Test's `TEST(suite, name) { ... }`).
+
+Declarations get documentation-comment ids with C++ names: `N:geo`, `T:geo::Shape`, `M:geo::Shape::move(const
+geo::Point&)`, `M:geo::Circle::area()const`, `F:geo::Point::x`, `D:CORE_MAX` for a macro. Parameter types are spelled
+canonically (workspace types with their full names, cv-qualifiers first, one spelling of each fundamental type),
+so a declaration in a header and its definition in a source file (`double Circle::area() const { ... }`, with the
+class found by lookup from the definition's namespace) are one symbol, the definition first. Template parameters are
+numbered as in C# ids (`` `0 `` of a class template, ``` ``0 ``` of a function template); specializations have their
+arguments in the id (`T:core::Box<int>`); `static` functions and variables of a namespace and unnamed namespaces have
+the name of their file (`M:core::twice(int)@registry.cpp`). The kinds are those of C# plus `Union`, `Function`,
+`Variable`, `TypeAlias`, `Concept` and `Macro`; documentation is the Doxygen comment as the parser attaches it, and
+`symbol_info` shows its brief.
+
+References are bound with C++ name lookup (blocks, classes and their bases, namespaces with inline namespaces,
+using-directives also of included headers, using-declarations, `using enum`, namespace aliases), the types of
+expressions (locals, `auto`, members with the template arguments of the receiver substituted, `this`, casts,
+`new`, pointers and the smart pointers, optionals and containers of the standard library), overload resolution by
+the number and types of arguments, value category (`T&&` against `const T&`), default arguments and packs, with
+non-template functions preferred, explicit template arguments and explicit specializations, argument-dependent
+lookup, operators (`a + b`, `a[i]`, `f(x)` on a class with `operator()`), constructors (`Widget w(1)`, `new`,
+functional casts, ctor-initializers) and macros (calls, names in conditional directives). Virtual functions are
+linked to those they override, destructors included; the tools list all bases of a class. Calls on a receiver of
+unknown type, such as a template parameter, are name-only candidates; members of the standard library are not
+modeled, and calls to them are recorded as unbound by name.
+
+`CppOracleTests` compares declarations and references with clang's JSON AST (`clang++`, or `CLANG_PATH`; without it
+the tests are inconclusive). On a fixture with headers, templates, overloads, operators and virtual functions
+(`tests/PaspanCodeGraph.Tests/Cpp/Fixture`) they match exactly. On the C++ corpus of the PaspanParsers parser, each
+file its own workspace, declarations reach a recall of 99.9% and a precision of 100%, references to members,
+functions, variables and enumerators 98.7% and 100%. On {fmt} (the library and its tests, 58 files and 2.5 MB, loaded
+in about 2 s), every file of the library parses and the 25 test files do not (Google Test's macros); compared with
+clang on `src/*.cc` and the headers they include, declarations reach 99.7% and 97.7%, references 87.1% and 97.3%,
+most missing ones being calls that clang binds in instantiations of templates. `CPP_ORACLE_WORKSPACE` (and
+`CPP_ORACLE_SOURCES`, such as `src/*.cc`) runs the comparison on any C++ workspace. Updates and the graph cache work
+as for C#: a change to a `#define` or `#include`, or to the names of types and templates, parses every C++ file again.
 
 ## Updates and the graph cache
 

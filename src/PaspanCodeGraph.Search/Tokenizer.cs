@@ -22,6 +22,11 @@ public static class Tokenizer
         "record", "enum", "namespace", "using", "else", "int", "bool", "string", "object", "out", "ref", "in", "params",
         "async", "await", "task", "get", "set", "init", "value", "see", "cref", "summary", "param", "name", "returns",
         "langword", "paramref", "typeparam", "remarks", "c", "para", "system", "collections", "generic", "linq",
+
+        // C++ keywords and Doxygen commands
+        "auto", "const", "constexpr", "unsigned", "signed", "char", "long", "short", "double", "float", "inline", "extern",
+        "template", "typename", "typedef", "std", "nullptr", "noexcept", "explicit", "friend", "operator", "union",
+        "brief", "tparam", "t",
     };
 
     /// <summary>The terms of <paramref name="text"/>, in order, with repeats.</summary>

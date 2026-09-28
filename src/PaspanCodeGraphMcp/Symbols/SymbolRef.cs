@@ -4,7 +4,8 @@ namespace PaspanCodeGraphMcp.Symbols;
 
 /// <summary>
 /// How a tool argument names a symbol: a documentation-comment id (<c>M:Ns.Type.Method(System.String)</c>,
-/// <c>T:Ns.Type</c>), a 1-based source position (<c>src/File.cs:120:17</c>) or a (dotted) name.
+/// <c>T:Ns.Type</c>, <c>M:ns::Widget::resize(int)</c>, <c>D:MACRO</c>), a 1-based source position
+/// (<c>src/File.cs:120:17</c>, <c>src/widget.cpp:12:5</c>) or a (dotted or <c>::</c>-qualified) name.
 /// </summary>
 public abstract partial record SymbolRef
 {
@@ -36,9 +37,9 @@ public abstract partial record SymbolRef
         return new Name(input);
     }
 
-    [GeneratedRegex("^[TMPFEN]:[A-Za-z_@]")]
+    [GeneratedRegex(@"^[TMPFEND]:[\p{L}_@(]")]
     private static partial Regex DeclarationIdRegex();
 
-    [GeneratedRegex(@"^(.+?\.cs):(\d+):(\d+)$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(.+?\.[\w+]+):(\d+):(\d+)$", RegexOptions.IgnoreCase)]
     private static partial Regex PositionRegex();
 }

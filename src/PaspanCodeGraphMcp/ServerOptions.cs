@@ -5,7 +5,7 @@ namespace PaspanCodeGraphMcp;
 /// <summary>Process-wide settings, from command-line arguments and then <c>PASPAN_*</c> environment variables.</summary>
 public sealed class ServerOptions
 {
-    /// <summary>The .sln, .slnx, .csproj or directory to load at startup.</summary>
+    /// <summary>The .sln, .slnx, .csproj, .vcxproj, compile_commands.json or directory to load at startup.</summary>
     public string? WorkspacePath { get; init; }
 
     /// <summary>The MSBuild Configuration that project conditions and DEBUG/RELEASE depend on.</summary>
@@ -38,11 +38,12 @@ public sealed class ServerOptions
         ?? "0.0.0";
 
     public const string Usage = """
-        paspan-code-graph-mcp: a read-only MCP server (stdio) for C# code analysis by AI agents.
+        paspan-code-graph-mcp: a read-only MCP server (stdio) for C# and C++ code analysis by AI agents.
 
         Usage: paspan-code-graph-mcp [options] [workspace]
 
-          workspace, -w, --workspace <path>  .sln, .slnx, .csproj or a directory holding one  (PASPAN_WORKSPACE)
+          workspace, -w, --workspace <path>  .sln, .slnx, .csproj, .vcxproj, compile_commands.json, or a directory
+                                             holding one (or C++ sources)                      (PASPAN_WORKSPACE)
           -c, --configuration <name>         build configuration, default Debug                (PASPAN_CONFIGURATION)
           -p, --platform <name>              build platform, default AnyCPU                    (PASPAN_PLATFORM)
           --no-watch                         do not update the graph when files change         (PASPAN_WATCH=0)

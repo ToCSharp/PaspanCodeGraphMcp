@@ -136,7 +136,7 @@ public sealed class CodeGraph
 
             var target = nodes[to];
             var kind = target.Kind.IsType() ? EdgeKind.ReferencesType
-                : target.Kind is SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Operator or SymbolKind.Destructor ? EdgeKind.Calls
+                : target.Kind.IsCallable() ? EdgeKind.Calls
                 : EdgeKind.Uses;
             foreach (var reference in index.ReferencesTo(targetId))
             {

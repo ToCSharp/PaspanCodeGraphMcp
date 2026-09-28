@@ -54,7 +54,7 @@ public sealed class CallGraphTools
     [Description("Who calls a method, constructor, property, indexer or event: each call site with the calling member. Calls are bound like the compiler binds them (receiver type, overloads, extension methods, lambdas); Exact when every type involved is known, Inferred when some were inferred. Calls to a member this one overrides or implements are included with isDirect=false. Calls on receivers of unknown type (bound only by name) are counted in nameOnlyCallSites and listed with includeNameOnly=true.")]
     public static async Task<object> FindCallers(
         WorkspaceHost host,
-        [Description("Member id, 'file.cs:line:col', or a (dotted) name such as 'Parser.Parse'; for a member of a referenced assembly, its documentation id (M:System.Console.WriteLine(System.String))")] string symbol,
+        [Description("Member id, 'file:line:col', or a (dotted) name such as 'Parser.Parse'; for a member of a referenced assembly, its documentation id (M:System.Console.WriteLine(System.String))")] string symbol,
         [Description("Maximum call sites (default 50)")] int maxResults = 50,
         [Description("Call sites to skip, for paging (default 0)")] int offset = 0,
         [Description("Include call sites in test files (default true; they are flagged isTest)")] bool includeTests = true,
@@ -68,9 +68,9 @@ public sealed class CallGraphTools
             return ambiguous!;
         }
 
-        if (resolved.Kind is not (SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator))
+        if (!resolved.Kind.IsCallable() && resolved.Kind is not (SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event))
         {
-            throw new ArgumentException($"find_callers needs a method, constructor, property, indexer or event; '{resolved.Signature}' is a {resolved.Kind}. Use find_references for types and fields.");
+            throw new ArgumentException($"find_callers needs a method, function, constructor, property, indexer, event or macro; '{resolved.Signature}' is a {resolved.Kind}. Use find_references for types and fields.");
         }
 
         var sites = new List<(SymbolReference Reference, CodeSymbol Target)>();
@@ -126,7 +126,7 @@ public sealed class CallGraphTools
     [Description("What a member's body calls or uses: methods, constructors, properties, indexers, events and method groups, each bound to its declaration (overloads and extension methods resolved), with the number of calls and the first line. For a type, the callees of all its members. Members of types from referenced assemblies are listed with their documentation ids (external), bound through the reference assemblies of the framework and the NuGet packages. Virtual and interface targets are flagged with their known implementation count. Calls on receivers of unknown type are counted in nameOnly and listed with includeNameOnly=true; calls that could not be bound at all are listed by name in unresolved. Fields and enum members are not callees; use find_references for them.")]
     public static async Task<object> FindCallees(
         WorkspaceHost host,
-        [Description("Member or type id, 'file.cs:line:col', or a (dotted) name")] string symbol,
+        [Description("Member or type id, 'file:line:col', or a (dotted) name")] string symbol,
         [Description("Include members of types from referenced assemblies (default true)")] bool includeExternal = true,
         [Description("Also list the callees bound only by name (default false)")] bool includeNameOnly = false,
         [Description("Maximum callees (default 100)")] int maxResults = 100,
@@ -165,7 +165,7 @@ public sealed class CallGraphTools
                     continue;
                 }
 
-                if (!isExternal && snapshot.Index.Get(targetId) is not { Kind: SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator })
+                if (!isExternal && snapshot.Index.Get(targetId) is not { Kind: SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator or SymbolKind.Function or SymbolKind.Destructor or SymbolKind.Macro })
                 {
                     continue;
                 }

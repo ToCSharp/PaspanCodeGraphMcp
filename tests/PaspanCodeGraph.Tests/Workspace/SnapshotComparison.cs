@@ -11,7 +11,7 @@ internal static class SnapshotComparison
         foreach (var s in snapshot.Index.Symbols.OrderBy(s => s.Id, StringComparer.Ordinal))
         {
             lines.Add(string.Join(" | ",
-                s.Id, s.Kind, s.Name, s.Signature, s.Container?.Id, s.Namespace, s.Project, s.Assembly, s.Accessibility,
+                s.Id, s.Kind, s.Name, s.Signature, s.Container?.Id, s.Namespace, s.Project, s.Assembly, s.Accessibility, s.Language,
                 string.Join(",", s.Modifiers),
                 string.Join(",", s.Declarations.Select(d => $"{d.File}:{d.Start}-{d.End}@{d.Line}:{d.Column}")),
                 string.Join(",", s.Members.Select(m => m.Id)),
