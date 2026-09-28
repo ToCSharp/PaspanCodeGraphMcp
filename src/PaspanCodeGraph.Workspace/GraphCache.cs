@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using PaspanCodeGraph.CSharp;
 using PaspanCodeGraph.Metadata;
+using PaspanParsers;
 using PaspanParsers.CSharp;
 
 namespace PaspanCodeGraph.Workspace;

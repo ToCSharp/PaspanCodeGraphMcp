@@ -4,6 +4,7 @@ using System.Text;
 using Paspan;
 using PaspanCodeGraph.CSharp;
 using PaspanCodeGraph.Metadata;
+using PaspanParsers;
 using PaspanParsers.CSharp;
 
 namespace PaspanCodeGraph.Workspace;

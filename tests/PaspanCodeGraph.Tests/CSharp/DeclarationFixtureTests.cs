@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using PaspanCodeGraph.CSharp;
+using PaspanParsers;
 using PaspanParsers.CSharp;
 using CSharpParseOptions = PaspanParsers.CSharp.CSharpParseOptions;
 
