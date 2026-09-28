@@ -80,8 +80,8 @@ public sealed class WorkspaceHost(ServerOptions options, ILogger<WorkspaceHost> 
         }
 
         return _snapshot ?? throw new InvalidOperationException(LastError is { } error
-            ? $"The workspace failed to load: {error}. Call workspace_load with a .sln, .slnx or .csproj path."
-            : "No workspace loaded. Call workspace_load with a .sln, .slnx or .csproj path, or start the server with --workspace.");
+            ? $"The workspace failed to load: {error}. Call workspace_load with a .sln, .slnx, .csproj, .vcxproj or compile_commands.json path, or a directory of C++ sources."
+            : "No workspace loaded. Call workspace_load with a .sln, .slnx, .csproj, .vcxproj or compile_commands.json path, or a directory of C++ sources, or start the server with --workspace.");
     }
 
     public void StartBackgroundLoad(string path, CancellationToken cancellationToken)

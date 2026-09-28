@@ -98,4 +98,37 @@ public sealed class CppOracleTests
         Assert.IsTrue(total.Compared > 200, total.Report("references"));
         Assert.IsTrue(total.Precision >= 0.95 && total.Recall >= 0.9, total.Report("references"));
     }
+
+    /// <summary>
+    /// A workspace named by <c>CPP_ORACLE_WORKSPACE</c> (a folder, compile_commands.json or .vcxproj), compared with
+    /// clang on its source files (those of <c>CPP_ORACLE_SOURCES</c>, a glob such as <c>src/*.cc</c>, or every source
+    /// file) with the project's include directories; reports go to <c>cpp-external-*-report.txt</c>.
+    /// </summary>
+    [TestMethod]
+    public void ExternalWorkspace_MatchesClang()
+    {
+        ClangOracle.RequireClang();
+        var path = Environment.GetEnvironmentVariable("CPP_ORACLE_WORKSPACE");
+        if (string.IsNullOrEmpty(path))
+        {
+            Assert.Inconclusive("Set CPP_ORACLE_WORKSPACE to compare a C++ workspace with clang.");
+        }
+
+        var snapshot = WorkspaceLoader.Load(path, readReferences: false);
+        var pattern = Environment.GetEnvironmentVariable("CPP_ORACLE_SOURCES");
+        var sources = snapshot.Documents.Keys
+            .Where(f => !CppFiles.IsHeader(f))
+            .Where(f => pattern == null || ProjectFileReader.WildcardRegex(SolutionDiscovery.NormalizeSeparators(pattern)).IsMatch(Path.GetRelativePath(snapshot.Directory, f)))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        var project = snapshot.Projects.First();
+        var oracle = ClangOracle.Run(snapshot.Directory, sources, project.IncludeDirectories);
+        var declarations = CppOracleComparison.Declarations(snapshot, oracle);
+        var references = CppOracleComparison.References(snapshot, oracle);
+        var failed = snapshot.Documents.Values.Where(d => d.Failure != null).Select(d => d.Path + ": " + d.Failure).ToList();
+        var summary = $"{snapshot.Documents.Count} files, {failed.Count} not parsed; clang failed on {oracle.Failures.Count} of {sources.Count}\n";
+        WriteReport("cpp-external-declarations-report.txt", summary + declarations.Report("declarations") + "\n\nNot parsed:\n" + string.Join("\n", failed) + "\n\nClang failures:\n" + string.Join("\n", oracle.Failures));
+        WriteReport("cpp-external-references-report.txt", summary + references.Report("references"));
+        Console.WriteLine(summary + declarations.Report("declarations").Split('\n')[0] + "\n" + references.Report("references").Split('\n')[0]);
+    }
 }

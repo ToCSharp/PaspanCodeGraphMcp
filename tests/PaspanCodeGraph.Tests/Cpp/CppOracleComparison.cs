@@ -25,11 +25,13 @@ public static class CppOracleComparison
     /// </summary>
     public static Result Declarations(WorkspaceSnapshot snapshot, ClangOracle oracle)
     {
+        // The files both read: those clang compiled or included, and that the graph parsed
+        var files = Compared(snapshot, oracle);
         var ours = new Dictionary<ClangLocation, List<CodeSymbol>>();
         // Clang's unnamed classes are not compared: the graph names those of variables after them
         foreach (var symbol in snapshot.Index.Symbols.Where(s => s.Language == SourceLanguage.Cpp && s.Kind != SymbolKind.Macro && !s.Name.StartsWith("(unnamed", StringComparison.Ordinal)))
         {
-            foreach (var declaration in symbol.Declarations)
+            foreach (var declaration in symbol.Declarations.Where(d => files.Contains(d.File)))
             {
                 if (!ours.TryGetValue(At(snapshot, declaration), out var list))
                 {
@@ -43,7 +45,8 @@ public static class CppOracleComparison
         var differences = new List<string>();
         var matched = 0;
         var theirs = new HashSet<ClangLocation>();
-        foreach (var declaration in oracle.Declarations.OrderBy(d => d.Location.File, StringComparer.Ordinal).ThenBy(d => d.Location.Offset))
+        var compared = oracle.Declarations.Where(d => files.Contains(d.Location.File)).ToList();
+        foreach (var declaration in compared.OrderBy(d => d.Location.File, StringComparer.Ordinal).ThenBy(d => d.Location.Offset))
         {
             theirs.Add(declaration.Location);
             if (ours.TryGetValue(declaration.Location, out var symbols) && symbols.Any(s => SameKind(s.Kind, declaration.Kind)))
@@ -66,8 +69,11 @@ public static class CppOracleComparison
             }
         }
 
-        return new Result(oracle.Declarations.Count, matched, extra, differences);
+        return new Result(compared.Count, matched, extra, differences);
     }
+
+    private static HashSet<string> Compared(WorkspaceSnapshot snapshot, ClangOracle oracle) =>
+        oracle.Files.Where(f => snapshot.Documents.TryGetValue(f, out var document) && document.CppUnit != null).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>A typedef of an unnamed class names the class: the graph declares the class there.</summary>
     private static bool SameKind(SymbolKind ours, SymbolKind theirs) =>
@@ -81,6 +87,7 @@ public static class CppOracleComparison
     public static Result References(WorkspaceSnapshot snapshot, ClangOracle oracle)
     {
         var index = snapshot.Index;
+        var files = Compared(snapshot, oracle);
         var initializers = MemberInitializerNames(snapshot);
         var hidden = HiddenSpans(snapshot);
         foreach (var (file, begin, end) in oracle.DependentRanges)
@@ -106,7 +113,7 @@ public static class CppOracleComparison
 
             foreach (var reference in index.ReferencesTo(id))
             {
-                if (reference.Confidence == Confidence.NameOnly || initializers.Contains((reference.File, reference.Start)) || Hidden(reference.File, reference.Start))
+                if (reference.Confidence == Confidence.NameOnly || !files.Contains(reference.File) || initializers.Contains((reference.File, reference.Start)) || Hidden(reference.File, reference.Start))
                 {
                     continue;
                 }
@@ -124,7 +131,7 @@ public static class CppOracleComparison
             }
         }
 
-        var theirs = oracle.References.Where(r => !Hidden(r.Location.File, r.Location.Offset)).Select(r => (r.Location, r.Target, r.Name)).Distinct().OrderBy(r => r.Location.File, StringComparer.Ordinal).ThenBy(r => r.Location.Offset).ToList();
+        var theirs = oracle.References.Where(r => files.Contains(r.Location.File) && !Hidden(r.Location.File, r.Location.Offset)).Select(r => (r.Location, r.Target, r.Name)).Distinct().OrderBy(r => r.Location.File, StringComparer.Ordinal).ThenBy(r => r.Location.Offset).ToList();
         var differences = new List<string>();
         var matched = 0;
         var matchedOurs = new HashSet<(ClangLocation, CodeSymbol)>();
@@ -167,7 +174,12 @@ public static class CppOracleComparison
         {
             if (document.CppUnit != null)
             {
-                Collect(document.Path, document.CppUnit.Declarations, names);
+                var inFile = new HashSet<(string, int)>();
+                Collect(document.Path, document.CppUnit.Declarations, inFile);
+                foreach (var (file, offset) in inFile)
+                {
+                    names.Add((file, document.CppMap?.Original(offset) ?? offset));
+                }
             }
         }
 
@@ -224,7 +236,7 @@ public static class CppOracleComparison
 
             var spans = new List<PaspanParsers.TextSpan>();
             Hidden(document.CppUnit, spans);
-            result[document.Path] = spans;
+            result[document.Path] = document.CppMap is { } map ? spans.Select(s => new PaspanParsers.TextSpan(map.Original(s.Start), map.Original(s.End, end: true))).ToList() : spans;
         }
 
         return result;

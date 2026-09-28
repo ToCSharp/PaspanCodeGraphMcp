@@ -50,11 +50,13 @@ public sealed partial class CppSymbolCollector
 
     private void RecordReference(string targetId, int offset, string? inMember, Confidence confidence)
     {
-        if (_suppress > 0 || offset < 0 || offset > _source.Utf8.Length)
+        // A name in the expansion of a macro is written in the macro's definition, not here
+        if (_suppress > 0 || offset < 0 || offset > _source.Utf8.Length || _source.Map?.IsExpanded(offset) == true)
         {
             return;
         }
 
+        offset = _source.Original(offset);
         var (line, column) = _source.Lines.GetLineAndColumn(offset);
         _references.Add((targetId, new SymbolReference(_source.Path, offset, line, column, inMember, confidence)));
     }
@@ -1806,6 +1808,13 @@ public sealed partial class CppSymbolCollector
         if (keys == 1)
         {
             return new Choice(top[0], Confidence.Inferred, []);
+        }
+
+        // Between a function and function templates that match as well, the function is chosen
+        var functions = top.Where(t => _binder.FindInfo(t) is { FunctionTemplateArity: 0 }).ToList();
+        if (functions.Count == 1)
+        {
+            return new Choice(functions[0], Confidence.Inferred, []);
         }
 
         return new Choice(null, Confidence.NameOnly, top);

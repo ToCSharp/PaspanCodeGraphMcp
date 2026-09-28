@@ -117,7 +117,7 @@ public sealed class GraphTools
     [Description("Collects what an agent needs to understand or change a symbol, within a token budget: the symbol's source (a type's header and member signatures), then the symbols around it in the graph, nearest and most relevant first (containing type, base types and interfaces, overridden and implemented members, callers, callees, overrides and implementations, used and using members, referenced types), each with its signature, summary, notes kept with annotate and, while the budget allows, its code. Give a symbol, or a query to start from the best search_code matches.")]
     public static async Task<object> GetContext(
         WorkspaceHost host,
-        [Description("Symbol id, 'file.cs:line:col', or a (dotted) name")] string? symbol = null,
+        [Description("Symbol id, 'file:line:col', or a (dotted) name")] string? symbol = null,
         [Description("Words to search for when no symbol is given; the best matches become the seeds")] string? query = null,
         [Description("How many edges away to look (1 to 3, default 1)")] int depth = 1,
         [Description("Approximate token budget for the whole answer (default 4000)")] int tokenBudget = 4000,
@@ -258,7 +258,7 @@ public sealed class GraphTools
     [Description("What may break if a symbol changes: the members that use it and, transitively, those that use them, up to a depth; for a type also the users of its members and its derived types; for a virtual or interface member also its overrides and implementations. Grouped by depth and by project, with the affected tests listed. Works for members of referenced assemblies too (by documentation id).")]
     public static async Task<object> ImpactAnalysis(
         WorkspaceHost host,
-        [Description("Symbol id, 'file.cs:line:col', a (dotted) name, or the documentation id of a member of a referenced assembly")] string symbol,
+        [Description("Symbol id, 'file:line:col', a (dotted) name, or the documentation id of a member of a referenced assembly")] string symbol,
         [Description("How many steps of use to follow (default 3)")] int depth = 3,
         [Description("Also follow uses bound only by name (default false)")] bool includeNameOnly = false,
         [Description("Maximum items to list (default 100); the counts cover all")] int maxResults = 100,
@@ -336,7 +336,7 @@ public sealed class GraphTools
     [Description("How one symbol reaches another: the shortest chain of calls, uses and type references from 'from' to 'to' (a call to a base or interface member continues into its overrides and implementations), each step with the place of the call. When 'from' does not reach 'to', the reverse direction is tried.")]
     public static async Task<object> FindPath(
         WorkspaceHost host,
-        [Description("Where the path starts: symbol id, 'file.cs:line:col', or a (dotted) name")] string from,
+        [Description("Where the path starts: symbol id, 'file:line:col', or a (dotted) name")] string from,
         [Description("Where the path ends")] string to,
         [Description("Maximum steps (default 8)")] int maxDepth = 8,
         [Description("Also follow calls bound only by name (default false)")] bool includeNameOnly = false,
@@ -482,7 +482,7 @@ public sealed class GraphTools
     [Description("Keeps a short note about a symbol, namespace or project (what it is for, how a flow works, a pitfall), so that later search_code, get_context and module_map answers carry it: summaries of modules written once by the agent instead of re-derived. Notes are stored in .paspan/annotations.json next to the solution and survive reloads. Give an empty note to remove one; omit the note to read it.")]
     public static async Task<AnnotateResult> Annotate(
         WorkspaceHost host,
-        [Description("Symbol id, 'file.cs:line:col', a (dotted) name, 'N:Namespace', or 'project:Name'")] string target,
+        [Description("Symbol id, 'file:line:col', a (dotted) name, 'N:Namespace', or 'project:Name'")] string target,
         [Description("The note; empty removes it; omitted reads it")] string? note = null,
         CancellationToken ct = default)
     {

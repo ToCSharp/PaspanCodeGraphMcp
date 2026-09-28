@@ -170,7 +170,21 @@ public sealed class ClangOracle
         return new ClangLocation(_file, offset.GetValue<int>());
     }
 
-    private bool InWorkspace(ClangLocation location) => location.File.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+    private readonly Dictionary<string, bool> _inWorkspace = new(StringComparer.Ordinal);
+
+    /// <summary>A file under the workspace's directory (not a pseudo-file such as clang's "&lt;scratch space&gt;").</summary>
+    private bool InWorkspace(ClangLocation location)
+    {
+        if (!_inWorkspace.TryGetValue(location.File, out var inside))
+        {
+            _inWorkspace[location.File] = inside = location.File.StartsWith(_root + Path.DirectorySeparatorChar, StringComparison.Ordinal) && File.Exists(location.File);
+        }
+
+        return inside;
+    }
+
+    /// <summary>The workspace files clang read: the sources and the headers they include.</summary>
+    public IReadOnlySet<string> Files => _inWorkspace.Where(f => f.Value).Select(f => f.Key).ToHashSet(StringComparer.Ordinal);
 
     private void Walk(JsonObject node, bool inBody, bool inRecord, bool inFriend, bool implicitCode, string parent)
     {

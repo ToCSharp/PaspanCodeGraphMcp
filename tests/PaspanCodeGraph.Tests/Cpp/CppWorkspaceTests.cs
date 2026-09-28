@@ -166,7 +166,71 @@ public sealed class CppWorkspaceTests
         Assert.AreEqual(2, size.Declarations.Count);
         Assert.AreEqual(1, snapshot.Index.ReferencesTo("M:lib::twice(int)").Count);
         Assert.AreEqual(1, snapshot.Index.ReferencesTo("D:VALUE").Count, "a macro that is not a decoration stays");
-        CollectionAssert.AreEquivalent(new[] { "API", "INLINE_API" }, CppParsing.BlankableMacros(CppParsing.ScanMacros(File.ReadAllBytes(workspace.PathOf("api.h")))).ToArray());
+        CollectionAssert.AreEquivalent(new[] { "API", "INLINE_API" }, CppMacroPlan.From(CppMacroPlan.ScanDefinitions(File.ReadAllBytes(workspace.PathOf("api.h")))).Blankable.ToArray());
+    }
+
+    [TestMethod]
+    public void SyntaxMacros_AreExpanded_WithPositionsInTheFile()
+    {
+        using var workspace = new TempWorkspace();
+        workspace.Write("config.h", """
+            #pragma once
+            #if defined(__has_include)
+            #  define LIB_HAS_INCLUDE(x) __has_include(x)
+            #else
+            #  define LIB_HAS_INCLUDE(x) 0
+            #endif
+            #define LIB_BEGIN namespace lib { inline namespace v1 {
+            #define LIB_END } }
+            #define LIB_ENABLE_IF(...) typename enable_if<(__VA_ARGS__), int>::type = 0
+            #ifdef LIB_OPTIONAL
+            #  define LIB_EXTRA , int extra
+            #else
+            #  define LIB_EXTRA
+            #endif
+            """);
+        workspace.Write("lib.h", """
+            #pragma once
+            #include "config.h"
+            LIB_BEGIN
+            template <bool B, typename T> struct enable_if {};
+            template <typename T> struct enable_if<true, T> { using type = T; };
+            class Widget {
+            public:
+                template <typename T, LIB_ENABLE_IF(sizeof(T) > 1)> int take(T value LIB_EXTRA);
+                int size() const;
+            };
+            #if LIB_HAS_INCLUDE("config.h")
+            int configured();
+            #endif
+            LIB_END
+            """);
+        workspace.Write("lib.cpp", """
+            #include "lib.h"
+            LIB_BEGIN
+            int Widget::size() const { return configured(); }
+            LIB_END
+            """);
+
+        var snapshot = WorkspaceLoader.Load(workspace.Root, readReferences: false);
+        Assert.IsTrue(snapshot.Documents.Values.All(d => d.Failure == null), string.Join("\n", snapshot.Documents.Values.Select(d => d.Failure).OfType<string>()));
+        var index = snapshot.Index;
+
+        // Declared in the namespaces the macros open, where the file has them
+        var widget = index.Get("T:lib::v1::Widget");
+        Assert.AreEqual(6, widget.Declarations.Single().Line);
+        Assert.AreEqual(7, widget.Declarations.Single().Column);
+        var size = index.Get("M:lib::v1::Widget::size()const");
+        Assert.AreEqual(2, size.Declarations.Count);
+        Assert.AreEqual((3, 13), (size.Declarations[0].Line, size.Declarations[0].Column));
+        Assert.IsNotNull(index.Get("M:lib::v1::Widget::take``2(``0)"), string.Join(", ", index.Symbols.Select(x => x.Id)));
+        Assert.AreEqual("T:lib::v1::Widget", index.Search("lib::Widget").Single().Id, "an inline namespace can be left out");
+
+        // A macro of an included header is known in the file's conditions
+        var configured = index.Get("M:lib::v1::configured()");
+        Assert.IsNotNull(configured, "LIB_HAS_INCLUDE comes from config.h");
+        var call = index.ReferencesTo(configured.Id).Single();
+        Assert.AreEqual((3, 35), (call.Line, call.Column));
     }
 
     [TestMethod]

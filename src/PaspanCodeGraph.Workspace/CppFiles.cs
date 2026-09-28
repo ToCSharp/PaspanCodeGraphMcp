@@ -427,19 +427,81 @@ public static class CppFiles
         }
         else
         {
-            macros["__clang__"] = "1";
-            macros["__clang_major__"] = "18";
-            macros["__GNUC__"] = "4";
-            macros["__GNUC_MINOR__"] = "2";
-            macros["__linux__"] = "1";
-            macros["__unix__"] = "1";
-            macros["__x86_64__"] = "1";
-            macros["__CHAR_BIT__"] = "8";
-            macros["__SIZEOF_POINTER__"] = "8";
-            macros["__SIZEOF_LONG__"] = "8";
+            foreach (var (name, value) in new[]
+            {
+                ("__clang__", "1"), ("__clang_major__", "18"), ("__clang_minor__", "1"), ("__GNUC__", "4"), ("__GNUC_MINOR__", "2"),
+                ("__GNUC_PATCHLEVEL__", "1"), ("__GNUG__", "4"), ("__linux__", "1"), ("__linux", "1"), ("__unix__", "1"), ("__unix", "1"),
+                ("__x86_64__", "1"), ("__x86_64", "1"), ("__amd64__", "1"), ("__LP64__", "1"), ("_LP64", "1"), ("__ELF__", "1"),
+                ("__CHAR_BIT__", "8"), ("__SIZEOF_POINTER__", "8"), ("__SIZEOF_LONG__", "8"), ("__SIZEOF_INT__", "4"),
+                ("__SIZEOF_LONG_LONG__", "8"), ("__SIZEOF_SHORT__", "2"), ("__SIZEOF_SIZE_T__", "8"), ("__SIZEOF_WCHAR_T__", "4"),
+                ("__SIZEOF_INT128__", "16"), ("__SIZEOF_FLOAT__", "4"), ("__SIZEOF_DOUBLE__", "8"), ("__SIZEOF_LONG_DOUBLE__", "16"),
+                ("__ORDER_LITTLE_ENDIAN__", "1234"), ("__ORDER_BIG_ENDIAN__", "4321"), ("__BYTE_ORDER__", "1234"),
+                ("__INT_MAX__", "2147483647"), ("__LONG_MAX__", "9223372036854775807L"), ("__SCHAR_MAX__", "127"),
+                ("__EXCEPTIONS", "1"), ("__GXX_RTTI", "1"), ("__STDC_UTF_16__", "1"), ("__STDC_UTF_32__", "1"),
+            })
+            {
+                macros[name] = value;
+            }
+        }
+
+        // The language's feature-test macros (those of the library come from <version>, which is not read)
+        foreach (var (name, value) in new[]
+        {
+            ("__cpp_exceptions", "199711L"), ("__cpp_rtti", "199711L"), ("__cpp_constexpr", "202211L"), ("__cpp_if_constexpr", "201606L"),
+            ("__cpp_inline_variables", "201606L"), ("__cpp_fold_expressions", "201603L"), ("__cpp_concepts", "202002L"),
+            ("__cpp_consteval", "202211L"), ("__cpp_char8_t", "202207L"), ("__cpp_nontype_template_args", "201911L"),
+            ("__cpp_deduction_guides", "201703L"), ("__cpp_structured_bindings", "201606L"), ("__cpp_variadic_templates", "200704L"),
+            ("__cpp_rvalue_references", "200610L"), ("__cpp_lambdas", "200907L"), ("__cpp_generic_lambdas", "201707L"),
+            ("__cpp_decltype_auto", "201304L"), ("__cpp_return_type_deduction", "201304L"), ("__cpp_user_defined_literals", "200809L"),
+            ("__cpp_unicode_literals", "200710L"), ("__cpp_alias_templates", "200704L"), ("__cpp_variable_templates", "201304L"),
+            ("__cpp_aggregate_nsdmi", "201304L"), ("__cpp_binary_literals", "201304L"), ("__cpp_digit_separators", "201309L"),
+            ("__cpp_initializer_lists", "200806L"), ("__cpp_static_assert", "201411L"), ("__cpp_noexcept_function_type", "201510L"),
+            ("__cpp_three_way_comparison", "201907L"), ("__cpp_designated_initializers", "201707L"), ("__cpp_impl_coroutine", "201902L"),
+            ("__cpp_explicit_this_parameter", "202110L"),
+        })
+        {
+            macros[name] = value;
         }
 
         return macros;
+    }
+
+    /// <summary>
+    /// The directories of the system's headers, which <c>__has_include</c> looks in (headers are never read): those of
+    /// GCC and clang on Linux and of the C library, when they exist.
+    /// </summary>
+    public static IReadOnlyList<string> SystemIncludeDirectories { get; } = FindSystemIncludeDirectories();
+
+    private static List<string> FindSystemIncludeDirectories()
+    {
+        var result = new List<string>();
+        if (OperatingSystem.IsWindows())
+        {
+            return result;
+        }
+
+        try
+        {
+            var cxx = "/usr/include/c++";
+            if (Directory.Exists(cxx))
+            {
+                // The newest version of libstdc++
+                var newest = Directory.GetDirectories(cxx).OrderByDescending(d => int.TryParse(Path.GetFileName(d).Split('.')[0], out var v) ? v : 0).FirstOrDefault();
+                if (newest != null)
+                {
+                    result.Add(newest);
+                    result.AddRange(Directory.GetDirectories("/usr/include").Where(d => Path.GetFileName(d).EndsWith("-linux-gnu", StringComparison.Ordinal))
+                        .Select(d => Path.Combine(d, "c++", Path.GetFileName(newest))).Where(Directory.Exists));
+                }
+            }
+
+            result.AddRange(new[] { "/usr/local/include" }.Concat(Directory.Exists("/usr/include") ? Directory.GetDirectories("/usr/include").Where(d => Path.GetFileName(d).EndsWith("-linux-gnu", StringComparison.Ordinal)) : []).Append("/usr/include").Where(Directory.Exists));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -478,6 +540,28 @@ public static class CppFiles
         }
 
         return result;
+    }
+
+    /// <summary>The workspace file an include names (<c>"name"</c> or <c>&lt;name&gt;</c>, with its quotes or brackets), or null.</summary>
+    public static string? ResolveInclude(string file, string name, IReadOnlyList<string> includeDirectories, IReadOnlySet<string> workspaceFiles, IReadOnlyDictionary<string, List<string>> filesByName) =>
+        name.Length > 2 ? ResolveInclude(file, name[1..^1], name[0] == '"', includeDirectories, workspaceFiles, filesByName) : null;
+
+    /// <summary>The workspace files by file name, for <see cref="ResolveInclude(string, string, IReadOnlyList{string}, IReadOnlySet{string}, IReadOnlyDictionary{string, List{string}})"/>.</summary>
+    public static Dictionary<string, List<string>> ByName(IEnumerable<string> files)
+    {
+        var byName = new Dictionary<string, List<string>>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (var file in files.Order(StringComparer.Ordinal))
+        {
+            var name = Path.GetFileName(file);
+            if (!byName.TryGetValue(name, out var list))
+            {
+                byName[name] = list = [];
+            }
+
+            list.Add(file);
+        }
+
+        return byName;
     }
 
     private static string? ResolveInclude(string file, string name, bool quoted, IReadOnlyList<string> includeDirectories, IReadOnlySet<string> workspaceFiles, IReadOnlyDictionary<string, List<string>> filesByName)

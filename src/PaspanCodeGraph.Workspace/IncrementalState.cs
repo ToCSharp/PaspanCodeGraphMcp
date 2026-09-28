@@ -28,7 +28,7 @@ public sealed class FileState
 
     public required IReadOnlyList<(string TargetId, SymbolReference Reference)> References { get; init; }
 
-    /// <summary>C++: the <c>#define</c> directives of the file (<see cref="PaspanCodeGraph.Cpp.CppParsing.ScanMacros"/>).</summary>
+    /// <summary>C++: the <c>#define</c> directives of the file (<see cref="PaspanCodeGraph.Cpp.CppMacroPlan.ScanDefinitions"/>).</summary>
     public IReadOnlyList<string> CppMacros { get; init; } = [];
 
     /// <summary>C++: the names the file declares for the parse of other files (<see cref="PaspanCodeGraph.Cpp.CppParsing.Names"/>).</summary>

@@ -7,9 +7,17 @@ namespace PaspanCodeGraph.Cpp;
 /// <summary>A parsed C++ file.</summary>
 /// <param name="Path">Full path of the file.</param>
 /// <param name="Project">Name of the project the file belongs to.</param>
-/// <param name="Utf8">The file's source as UTF-8 without the byte order mark; spans are offsets into it.</param>
+/// <param name="Utf8">The text the parser read (<see cref="CppMacroPlan.Prepare"/>): the file's, with macros blanked out or expanded.</param>
+/// <param name="Lines">The lines of the file.</param>
 /// <param name="Includes">The workspace files its <c>#include</c> directives name.</param>
-public sealed record CppSource(string Path, string Project, ReadOnlyMemory<byte> Utf8, LineMap Lines, TranslationUnit Unit, IReadOnlyList<string> Includes);
+public sealed record CppSource(string Path, string Project, ReadOnlyMemory<byte> Utf8, LineMap Lines, TranslationUnit Unit, IReadOnlyList<string> Includes)
+{
+    /// <summary>Takes offsets of <see cref="Utf8"/> back to the file when macros were expanded; null when they are the same.</summary>
+    public CppOffsetMap? Map { get; init; }
+
+    /// <summary>The offset in the file of an offset of the parsed text.</summary>
+    public int Original(int offset, bool end = false) => Map?.Original(offset, end) ?? offset;
+}
 
 /// <summary>What a pass over the files of a C++ workspace collects.</summary>
 public enum CppPass
@@ -1359,8 +1367,8 @@ public sealed partial class CppSymbolCollector
             }
 
             var position = Words(directive.Span.Start, directive.Span.End).Where(w => w.Word == macro.Name).Select(w => w.Offset).DefaultIfEmpty(directive.Span.Start).First();
-            var (line, column) = _source.Lines.GetLineAndColumn(position);
-            _builder.AddDeclaration(symbol, new SourceLocation(_source.Path, directive.Span.Start, directive.Span.End, line, column));
+            var (line, column) = _source.Lines.GetLineAndColumn(_source.Original(position));
+            _builder.AddDeclaration(symbol, new SourceLocation(_source.Path, _source.Original(directive.Span.Start), _source.Original(directive.Span.End, end: true), line, column));
         }
     }
 
@@ -1408,8 +1416,8 @@ public sealed partial class CppSymbolCollector
 
     private SourceLocation Location(CppNode declaration, int nameOffset)
     {
-        var (line, column) = _source.Lines.GetLineAndColumn(nameOffset);
-        return new SourceLocation(_source.Path, declaration.Span.Start, declaration.Span.End, line, column);
+        var (line, column) = _source.Lines.GetLineAndColumn(_source.Original(nameOffset));
+        return new SourceLocation(_source.Path, _source.Original(declaration.Span.Start), _source.Original(declaration.Span.End, end: true), line, column);
     }
 
     private string? Documentation(Declaration declaration) => DocumentationComment.GetText(Utf8, declaration) is { Length: > 0 } text ? text : null;

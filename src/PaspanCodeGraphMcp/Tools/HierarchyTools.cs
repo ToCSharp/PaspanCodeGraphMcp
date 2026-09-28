@@ -41,7 +41,7 @@ public sealed class HierarchyTools
     [Description("Base class chain, interfaces and derived types of a type. Base types are bound like the compiler binds them (usings, aliases, nested types); ones from referenced assemblies have no symbol. transitive=true gives the whole base chain, all interfaces (inherited ones included) and all derived types at any depth.")]
     public static async Task<object> TypeHierarchy(
         WorkspaceHost host,
-        [Description("Type id (T:...), 'file.cs:line:col', or a (dotted) type name")] string symbol,
+        [Description("Type id (T:...), 'file:line:col', or a (dotted) type name")] string symbol,
         [Description("Whole chains instead of direct bases and derived types (default false)")] bool transitive = false,
         [Description("Maximum derived types (default 100)")] int maxDerived = 100,
         CancellationToken ct = default)
@@ -120,7 +120,7 @@ public sealed class HierarchyTools
     [Description("What implements or specializes a symbol. For an interface: the types implementing it (directly or through a base or derived type) and the interfaces deriving from it. For a class: its derived types at any depth. For an interface member: the members implementing it, matched by name and parameter types (explicit implementations included), and their overrides. For a virtual or abstract member: its overrides at any depth.")]
     public static async Task<object> FindImplementations(
         WorkspaceHost host,
-        [Description("Type or member id, 'file.cs:line:col', or a (dotted) name")] string symbol,
+        [Description("Type or member id, 'file:line:col', or a (dotted) name")] string symbol,
         [Description("Maximum results (default 100)")] int maxResults = 100,
         CancellationToken ct = default)
     {
@@ -192,7 +192,7 @@ public sealed class HierarchyTools
     [Description("References to a type or member across the workspace, grouped by file, each with the member it is in. Types: in signatures, base lists, attributes, usings, generic arguments, 'new', casts, typeof, patterns and static member access. Members: calls (overloads and extension methods resolved), property, field and event accesses, object initializers, indexers ('[' of the access), constructor calls ('new', ': base(...)', attributes) and method groups. Exact when every type involved is known, Inferred when a type was inferred or a same-named local could hide a type. For a virtual or interface member, references to its overrides, implementations and the members it overrides or implements are included (includeImplementations=false restricts to the member itself). References on receivers of unknown type, bound only by name, are counted in nameOnly and listed with includeNameOnly=true. Types and members of referenced assemblies (framework, NuGet packages) are found by their documentation id.")]
     public static async Task<object> FindReferences(
         WorkspaceHost host,
-        [Description("Type or member id, 'file.cs:line:col', or a (dotted) name; for a type or member of a referenced assembly, its documentation id (M:System.String.Split(System.Char[]))")] string symbol,
+        [Description("Type or member id, 'file:line:col', or a (dotted) name; for a type or member of a referenced assembly, its documentation id (M:System.String.Split(System.Char[]))")] string symbol,
         [Description("Maximum references (default 200)")] int maxResults = 200,
         [Description("References to skip, for paging (default 0)")] int offset = 0,
         [Description("For a virtual or interface member, also the references to the members it is related to by overriding or implementing (default true)")] bool includeImplementations = true,

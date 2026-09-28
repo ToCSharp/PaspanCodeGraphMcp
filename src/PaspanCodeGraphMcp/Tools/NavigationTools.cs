@@ -24,7 +24,7 @@ public sealed record SymbolInfoResult(
 
 /// <summary>How a symbol relates to others; ids of workspace symbols, and base types from references as written.</summary>
 /// <param name="BaseType">The base class: its id, or its name as written when it is not a workspace type.</param>
-/// <param name="Interfaces">The interfaces a type lists, the same way.</param>
+/// <param name="Interfaces">The interfaces a type lists, the same way; for a C++ class, its bases after the first.</param>
 /// <param name="DerivedTypes">The number of types deriving directly from a type (type_hierarchy lists them).</param>
 /// <param name="Overrides">The member a member overrides.</param>
 /// <param name="Implements">The interface members a member implements.</param>
@@ -56,11 +56,11 @@ public sealed class NavigationTools
     private const int MaxCandidates = 20;
 
     [McpServerTool(Name = "find_symbol", ReadOnly = true, Idempotent = true, OpenWorld = false, Title = "Find symbol declarations")]
-    [Description("Find type/member declarations by name. Query is a (dotted) name, e.g. 'Trim', 'Pixmap.Trim', 'Connector.Ocr.Pixmap', with optional * and ? wildcards in the last segment. Substring match by default ('Parse' also finds ParseSslr and _parser); exact=true matches the whole name. Container segments always match whole names. Returns ids usable by every other tool.")]
+    [Description("Find type/member declarations by name. Query is a (dotted) name, e.g. 'Trim', 'Pixmap.Trim', 'Connector.Ocr.Pixmap' (C++ names may use '::': 'geo::Shape::area'), with optional * and ? wildcards in the last segment. Substring match by default ('Parse' also finds ParseSslr and _parser); exact=true matches the whole name. Container segments always match whole names. Returns ids usable by every other tool.")]
     public static async Task<FindSymbolResult> FindSymbol(
         WorkspaceHost host,
         [Description("Name or dotted path to search, wildcards allowed: 'Parse', 'Parser.Parse', 'Recognize*'")] string query,
-        [Description("Kind filter: Class, Interface, Struct, Enum, Record, RecordStruct, Delegate, Method, Constructor, Destructor, Property, Indexer, Field, Event, Operator, EnumMember")] string? kind = null,
+        [Description("Kind filter: Class, Interface, Struct, Enum, Record, RecordStruct, Delegate, Method, Constructor, Destructor, Property, Indexer, Field, Event, Operator, EnumMember; for C++ also Union, Function, Variable, TypeAlias, Concept, Macro")] string? kind = null,
         [Description("Restrict to one project by name")] string? project = null,
         [Description("Match the last segment as a whole name instead of a substring (default false)")] bool exact = false,
         [Description("Maximum results (default 50)")] int maxResults = 50,
@@ -77,7 +77,7 @@ public sealed class NavigationTools
     [Description("Signature, documentation summary, accessibility, modifiers, parameters, type parameters, base types as written, all declaration locations (partial types), and relations: bound base class and interfaces, overridden and implemented members, and counts of derived types, implementations and references.")]
     public static async Task<object> SymbolInfo(
         WorkspaceHost host,
-        [Description("Symbol id (T:/M:/P:/F:/E:), 'file.cs:line:col', or a (dotted) name")] string symbol,
+        [Description("Symbol id (T:/M:/P:/F:/E:/N:, D: for a C++ macro), 'file:line:col', or a (dotted) name")] string symbol,
         CancellationToken ct = default)
     {
         var snapshot = await host.RequireSnapshotAsync(ct);
@@ -118,7 +118,7 @@ public sealed class NavigationTools
     [Description("Declaration location(s) of a symbol, including all parts of partial types. A position resolves to the declaration whose name is there, else to the type named by a reference there, else to the innermost declaration containing it (member references are not resolved yet).")]
     public static async Task<object> GoToDefinition(
         WorkspaceHost host,
-        [Description("Symbol id, 'file.cs:line:col', or a (dotted) name")] string symbol,
+        [Description("Symbol id, 'file:line:col', or a (dotted) name")] string symbol,
         CancellationToken ct = default)
     {
         var snapshot = await host.RequireSnapshotAsync(ct);
@@ -137,7 +137,7 @@ public sealed class NavigationTools
     [Description("Outline of a type: its declared members with ids, kinds, accessibility. Cheap way to get member ids. includeInherited adds the members of the base types and interfaces declared in the workspace; bases from referenced assemblies are listed as unresolved.")]
     public static async Task<object> TypeMembers(
         WorkspaceHost host,
-        [Description("Type id (T:...), 'file.cs:line:col', or a (dotted) type name")] string symbol,
+        [Description("Type id (T:...), 'file:line:col', or a (dotted) type name")] string symbol,
         [Description("Kind filter: Method, Constructor, Property, Field, Event, Class, ...")] string? kind = null,
         [Description("Include members of base types declared in the workspace (default false)")] bool includeInherited = false,
         [Description("Maximum members (default 200)")] int maxResults = 200,
