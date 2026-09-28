@@ -21,12 +21,40 @@ public enum SymbolKind
     Event,
     Operator,
     EnumMember,
+
+    // C++
+    Union,
+
+    /// <summary>A function outside classes (a free function of a namespace).</summary>
+    Function,
+
+    /// <summary>A variable of a namespace.</summary>
+    Variable,
+
+    /// <summary>A <c>typedef</c> or an alias declaration (<c>using Name = Type;</c>).</summary>
+    TypeAlias,
+
+    Concept,
+
+    /// <summary>A macro defined with <c>#define</c>.</summary>
+    Macro,
+}
+
+/// <summary>The language a symbol is declared in.</summary>
+public enum SourceLanguage
+{
+    CSharp,
+    Cpp,
 }
 
 public static class SymbolKinds
 {
     public static bool IsType(this SymbolKind kind) => kind is SymbolKind.Class or SymbolKind.Struct or SymbolKind.Interface
-        or SymbolKind.Enum or SymbolKind.Record or SymbolKind.RecordStruct or SymbolKind.Delegate;
+        or SymbolKind.Enum or SymbolKind.Record or SymbolKind.RecordStruct or SymbolKind.Delegate or SymbolKind.Union or SymbolKind.TypeAlias;
+
+    /// <summary>Kinds that code calls: methods, constructors, functions, operators and the like.</summary>
+    public static bool IsCallable(this SymbolKind kind) => kind is SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Destructor
+        or SymbolKind.Operator or SymbolKind.Function or SymbolKind.Macro;
 
     public static bool IsMember(this SymbolKind kind) => !kind.IsType() && kind is not (SymbolKind.Namespace or SymbolKind.Extension);
 
@@ -128,6 +156,9 @@ public sealed class CodeSymbol
     public string? Assembly { get; set; }
 
     public bool IsExternal => Assembly != null;
+
+    /// <summary>The language of the declaration.</summary>
+    public SourceLanguage Language { get; set; }
 
     public string Accessibility { get; set; } = "";
 

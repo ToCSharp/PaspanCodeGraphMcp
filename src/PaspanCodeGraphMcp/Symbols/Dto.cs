@@ -60,12 +60,17 @@ public static partial class SymbolFormatter
 
     public static bool IsTestPath(string? path) => path is not null && TestPathRegex().IsMatch(path);
 
-    /// <summary>Plain text of the &lt;summary&gt; of a documentation comment, or null.</summary>
+    /// <summary>Plain text of the &lt;summary&gt; of a documentation comment (for C++, the brief of a Doxygen comment), or null.</summary>
     public static string? Summary(CodeSymbol symbol)
     {
         if (string.IsNullOrWhiteSpace(symbol.Documentation))
         {
             return null;
+        }
+
+        if (symbol.Language == SourceLanguage.Cpp)
+        {
+            return Brief(symbol.Documentation);
         }
 
         try
@@ -92,6 +97,39 @@ public static partial class SymbolFormatter
             return null;
         }
     }
+
+    /// <summary>
+    /// The brief of a Doxygen comment: the paragraph of <c>\brief</c> or <c>@brief</c>, else the first paragraph,
+    /// without commands that start a new section (<c>\param</c>, <c>\return</c>).
+    /// </summary>
+    private static string? Brief(string documentation)
+    {
+        var lines = documentation.Replace("\r\n", "\n").Split('\n');
+        var start = Array.FindIndex(lines, l => BriefRegex().IsMatch(l));
+        var paragraph = new List<string>();
+        for (var i = Math.Max(0, start); i < lines.Length; i++)
+        {
+            var line = i == start ? BriefRegex().Replace(lines[i], "") : lines[i];
+            if (line.Trim().Length == 0 ? paragraph.Count > 0 : SectionRegex().IsMatch(line))
+            {
+                break;
+            }
+
+            if (line.Trim().Length > 0)
+            {
+                paragraph.Add(line.Trim());
+            }
+        }
+
+        var text = WhitespaceRegex().Replace(string.Join(' ', paragraph), " ").Trim();
+        return text.Length == 0 ? null : text.Length > 400 ? text[..400] + "…" : text;
+    }
+
+    [GeneratedRegex(@"^\s*[\\@]brief\s*")]
+    private static partial Regex BriefRegex();
+
+    [GeneratedRegex(@"^\s*[\\@](param|tparam|return|returns|retval|throws?|exception|note|see|sa|pre|post|details)\b")]
+    private static partial Regex SectionRegex();
 
     [GeneratedRegex(@"(^|[\\/])[^\\/]*Tests?([\\/.]|$)", RegexOptions.IgnoreCase)]
     private static partial Regex TestPathRegex();

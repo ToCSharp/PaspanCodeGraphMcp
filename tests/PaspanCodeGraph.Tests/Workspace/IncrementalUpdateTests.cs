@@ -27,7 +27,7 @@ public sealed class IncrementalUpdateTests
         Assert.AreSame(snapshot.Index, unchanged.Index);
 
         // A body edit binds only the edited file
-        snapshot = Step(snapshot, solution, "a body edit", () => Replace(symbolIndex, "var parts = query.Split(", "var parts = (query + \"\").Split("));
+        snapshot = Step(snapshot, solution, "a body edit", () => Replace(symbolIndex, "var parts = query.Replace(", "var parts = (query + \"\").Replace("));
         Assert.AreEqual(1, snapshot.ParsedFiles);
         Assert.AreEqual(1, snapshot.BoundFiles);
 

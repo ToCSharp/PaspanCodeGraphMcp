@@ -236,13 +236,14 @@ public sealed class SymbolIndex
     }
 
     /// <summary>
-    /// Types and members by (dotted) name. The last segment matches as a substring, a whole name
+    /// Types and members by (dotted, or in C++ '::'-qualified) name. The last segment matches as a substring, a whole name
     /// (<paramref name="exact"/>) or a pattern with <c>*</c> and <c>?</c>; the other segments must appear, in
     /// order, among the containing types and namespaces. Exact matches come first, then shorter names.
     /// </summary>
     public List<CodeSymbol> Search(string query, SymbolKind? kind = null, string? project = null, bool exact = false, int limit = int.MaxValue)
     {
-        var parts = query.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // C++ names are qualified with '::'
+        var parts = query.Replace("::", ".", StringComparison.Ordinal).Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (parts.Length == 0)
         {
             return [];

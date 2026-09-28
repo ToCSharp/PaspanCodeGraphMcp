@@ -60,46 +60,29 @@ public sealed class HierarchyTools
 
         var baseTypes = new List<BaseTypeDto>();
         var interfaces = new List<BaseTypeDto>();
-        var seenInterfaces = new HashSet<string>(StringComparer.Ordinal);
-        var seenTypes = new HashSet<CodeSymbol> { type };
-        void AddInterfaces(CodeSymbol from, bool includeFirst)
+        if (type.Language == SourceLanguage.Cpp)
         {
-            for (var i = 0; i < from.Bases.Count; i++)
+            // C++ has no interfaces, and a class may have several bases: all of them, nearest first
+            var seenBases = new HashSet<string>(StringComparer.Ordinal);
+            var pending = new Queue<CodeSymbol>([type]);
+            while (pending.Count > 0)
             {
-                var link = from.Bases[i];
-                if (IsBaseClass(from, i) && !includeFirst)
+                foreach (var link in pending.Dequeue().Bases)
                 {
-                    continue;
-                }
-
-                if (!IsBaseClass(from, i) && seenInterfaces.Add(link.Id))
-                {
-                    interfaces.Add(ToDto(link, snapshot));
-                    if (transitive && link.Symbol is { } face && seenTypes.Add(face))
+                    if (seenBases.Add(link.Id))
                     {
-                        AddInterfaces(face, true);
+                        baseTypes.Add(ToDto(link, snapshot));
+                        if (transitive && link.Symbol is { } next)
+                        {
+                            pending.Enqueue(next);
+                        }
                     }
                 }
             }
         }
-
-        AddInterfaces(type, false);
-        for (var current = type; ;)
+        else
         {
-            if (current.Bases.Count == 0 || !IsBaseClass(current, 0))
-            {
-                break;
-            }
-
-            var link = current.Bases[0];
-            baseTypes.Add(ToDto(link, snapshot));
-            if (!transitive || link.Symbol is not { } next || !seenTypes.Add(next))
-            {
-                break;
-            }
-
-            AddInterfaces(next, false);
-            current = next;
+            CSharpBases(type, snapshot, transitive, baseTypes, interfaces);
         }
 
         var derived = new List<DerivedTypeDto>();
@@ -281,8 +264,55 @@ public sealed class HierarchyTools
         return new FindReferencesResult(SymbolFormatter.ToDto(resolved, snapshot), all.Count, offset, page.Count, offset + page.Count < all.Count, files, nameOnly);
     }
 
+    /// <summary>The base class chain and the interfaces of a C# type.</summary>
+    private static void CSharpBases(CodeSymbol type, WorkspaceSnapshot snapshot, bool transitive, List<BaseTypeDto> baseTypes, List<BaseTypeDto> interfaces)
+    {
+        var seenInterfaces = new HashSet<string>(StringComparer.Ordinal);
+        var seenTypes = new HashSet<CodeSymbol> { type };
+        void AddInterfaces(CodeSymbol from, bool includeFirst)
+        {
+            for (var i = 0; i < from.Bases.Count; i++)
+            {
+                var link = from.Bases[i];
+                if (IsBaseClass(from, i) && !includeFirst)
+                {
+                    continue;
+                }
+
+                if (!IsBaseClass(from, i) && seenInterfaces.Add(link.Id))
+                {
+                    interfaces.Add(ToDto(link, snapshot));
+                    if (transitive && link.Symbol is { } face && seenTypes.Add(face))
+                    {
+                        AddInterfaces(face, true);
+                    }
+                }
+            }
+        }
+
+        AddInterfaces(type, false);
+        for (var current = type; ;)
+        {
+            if (current.Bases.Count == 0 || !IsBaseClass(current, 0))
+            {
+                break;
+            }
+
+            var link = current.Bases[0];
+            baseTypes.Add(ToDto(link, snapshot));
+            if (!transitive || link.Symbol is not { } next || !seenTypes.Add(next))
+            {
+                break;
+            }
+
+            AddInterfaces(next, false);
+            current = next;
+        }
+    }
+
     /// <summary>Whether the base at <paramref name="index"/> is the base class (only the first one can be, and only of a class or record).</summary>
     internal static bool IsBaseClass(CodeSymbol type, int index) =>
+        type.Language == SourceLanguage.Cpp ||
         index == 0 && type.Kind is SymbolKind.Class or SymbolKind.Record
         && type.Bases[0] is var link && (link.Symbol is { } bound ? bound.Kind is SymbolKind.Class or SymbolKind.Record : !LooksLikeInterface(link.Written));
 

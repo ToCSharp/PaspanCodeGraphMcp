@@ -68,9 +68,9 @@ public sealed class CallGraphTools
             return ambiguous!;
         }
 
-        if (resolved.Kind is not (SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator))
+        if (!resolved.Kind.IsCallable() && resolved.Kind is not (SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event))
         {
-            throw new ArgumentException($"find_callers needs a method, constructor, property, indexer or event; '{resolved.Signature}' is a {resolved.Kind}. Use find_references for types and fields.");
+            throw new ArgumentException($"find_callers needs a method, function, constructor, property, indexer, event or macro; '{resolved.Signature}' is a {resolved.Kind}. Use find_references for types and fields.");
         }
 
         var sites = new List<(SymbolReference Reference, CodeSymbol Target)>();
@@ -165,7 +165,7 @@ public sealed class CallGraphTools
                     continue;
                 }
 
-                if (!isExternal && snapshot.Index.Get(targetId) is not { Kind: SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator })
+                if (!isExternal && snapshot.Index.Get(targetId) is not { Kind: SymbolKind.Method or SymbolKind.Constructor or SymbolKind.Property or SymbolKind.Indexer or SymbolKind.Event or SymbolKind.Operator or SymbolKind.Function or SymbolKind.Destructor or SymbolKind.Macro })
                 {
                     continue;
                 }

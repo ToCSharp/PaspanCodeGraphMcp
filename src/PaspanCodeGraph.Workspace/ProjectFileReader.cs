@@ -2,11 +2,12 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using PaspanParsers.CSharp;
+using PaspanParsers.Cpp;
 
 namespace PaspanCodeGraph.Workspace;
 
-/// <summary>What a C# project compiles, as read from its project file.</summary>
-/// <param name="Sources">Full paths of the C# files it compiles, in the order found.</param>
+/// <summary>What a C# or C++ project compiles, as read from its project file.</summary>
+/// <param name="Sources">Full paths of the files it compiles (for C++ also the headers), in the order found.</param>
 /// <param name="ProjectReferences">Full paths of the projects it references.</param>
 public sealed record ProjectModel(
     string Name,
@@ -36,7 +37,30 @@ public sealed record ProjectModel(
     /// <summary>The intermediate output directory, where NuGet restore writes <c>project.assets.json</c>.</summary>
     public string IntermediateOutputPath { get; init; } = "";
 
-    public string Directory => System.IO.Path.GetDirectoryName(Path)!;
+    public string Directory => System.IO.Directory.Exists(Path) ? Path : System.IO.Path.GetDirectoryName(Path)!;
+
+    /// <summary>The language of the sources: C# for .csproj projects, C++ for .vcxproj, compile_commands.json and folders.</summary>
+    public SourceLanguage Language { get; init; } = SourceLanguage.CSharp;
+
+    /// <summary>C++: the macros defined for every file (predefined ones and <c>-D</c> options), by name.</summary>
+    public IReadOnlyDictionary<string, string> Macros { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>C++: the include directories (<c>-I</c> options), as full paths.</summary>
+    public IReadOnlyList<string> IncludeDirectories { get; init; } = [];
+
+    /// <summary>C++: the language standard.</summary>
+    public CppLanguageVersion CppLanguageVersion { get; init; } = CppLanguageVersion.Latest;
+
+    /// <summary>C++: options of files compiled with other ones than the project's (from compile_commands.json), by path.</summary>
+    public IReadOnlyDictionary<string, CppFileOptions> FileOptions { get; init; } = new Dictionary<string, CppFileOptions>();
+}
+
+/// <summary>How one C++ file is compiled: its macros, include directories and standard.</summary>
+public sealed record CppFileOptions(IReadOnlyDictionary<string, string> Macros, IReadOnlyList<string> IncludeDirectories, CppLanguageVersion LanguageVersion)
+{
+    /// <summary>A stable text of the options, for comparing them between loads.</summary>
+    public string Print() => string.Join(";", Macros.OrderBy(m => m.Key, StringComparer.Ordinal).Select(m => m.Key + "=" + m.Value))
+        + "|" + string.Join(";", IncludeDirectories) + "|" + LanguageVersion;
 }
 
 /// <summary>
@@ -58,6 +82,9 @@ public sealed partial class ProjectFileReader
     private readonly List<string> _assemblyReferences = [];
     private readonly List<string> _usings = [];
     private readonly List<string> _removedUsings = [];
+    private readonly List<string> _cppSources = [];
+    private readonly HashSet<string> _cppSourceSet = new(SymbolIndexBuilder.PathComparer);
+    private readonly Dictionary<string, string> _clCompile = new(StringComparer.OrdinalIgnoreCase);
     private string _sdk = "";
     private readonly List<LoadProblem> _problems = [];
     private readonly HashSet<string> _imported = new(SymbolIndexBuilder.PathComparer);
@@ -93,6 +120,12 @@ public sealed partial class ProjectFileReader
     public static ProjectModel Read(string projectPath, string configuration = "Debug", string platform = "AnyCPU")
     {
         projectPath = Path.GetFullPath(projectPath);
+        if (projectPath.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase))
+        {
+            // C++ projects have no AnyCPU platform
+            return new ProjectFileReader(projectPath, configuration, platform == "AnyCPU" ? "x64" : platform).EvaluateCpp();
+        }
+
         var reader = new ProjectFileReader(projectPath, configuration, platform);
         var model = reader.Evaluate();
 
@@ -160,6 +193,52 @@ public sealed partial class ProjectFileReader
             FrameworkReferences = _frameworkReferences,
             AssemblyReferences = _assemblyReferences,
             IntermediateOutputPath = Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(Expand("$(BaseIntermediateOutputPath)") is { Length: > 0 } obj ? obj : "obj"))),
+        };
+    }
+
+    /// <summary>A .vcxproj: its ClCompile and ClInclude items and the ClCompile item definition of the configuration.</summary>
+    private ProjectModel EvaluateCpp()
+    {
+        var document = XDocument.Load(_projectPath);
+        var root = document.Root ?? throw new InvalidDataException($"Empty project file: {_projectPath}");
+        var directory = Path.GetDirectoryName(_projectPath)!;
+        _properties["ProjectDir"] = directory + Path.DirectorySeparatorChar;
+        _properties["ProjectName"] = _properties["MSBuildProjectName"];
+        _properties["SolutionDir"] = directory + Path.DirectorySeparatorChar;
+        EvaluateElements(root, _projectPath, isSdk: false);
+
+        var platform = _properties["Platform"];
+        var macros = CppFiles.PredefinedMacros(msvc: true, platform);
+        if (string.Equals(_properties["Configuration"], "Debug", StringComparison.OrdinalIgnoreCase))
+        {
+            macros["_DEBUG"] = "1";
+        }
+
+        foreach (var definition in _clCompile.GetValueOrDefault("PreprocessorDefinitions", "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!definition.StartsWith("%(", StringComparison.Ordinal) && !definition.Contains("$(", StringComparison.Ordinal))
+            {
+                CppFiles.Define(macros, definition);
+            }
+        }
+
+        var includes = new List<string>();
+        foreach (var include in _clCompile.GetValueOrDefault("AdditionalIncludeDirectories", "").Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!include.Contains("%(", StringComparison.Ordinal) && !include.Contains("$(", StringComparison.Ordinal))
+            {
+                includes.Add(Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(include))));
+            }
+        }
+
+        var standard = CppFiles.ParseStandard(_clCompile.GetValueOrDefault("LanguageStandard", "")) ?? CppLanguageVersion.Cpp20;
+        macros["__cplusplus"] = CppFiles.CplusplusValue(standard);
+        return new ProjectModel(_properties["ProjectName"], _projectPath, "", CSharpLanguageVersion.Latest, [], _cppSources, _references, _problems)
+        {
+            Language = SourceLanguage.Cpp,
+            Macros = macros,
+            IncludeDirectories = includes,
+            CppLanguageVersion = standard,
         };
     }
 
@@ -235,6 +314,19 @@ public sealed partial class ProjectFileReader
 
                     break;
 
+                case "ItemDefinitionGroup":
+                    foreach (var definition in element.Elements().Where(e => e.Name.LocalName == "ClCompile" && IsTrue(e)))
+                    {
+                        foreach (var metadata in definition.Elements().Where(IsTrue))
+                        {
+                            // %(PreprocessorDefinitions) is the value defined before
+                            var previous = _clCompile.GetValueOrDefault(metadata.Name.LocalName, "");
+                            _clCompile[metadata.Name.LocalName] = Expand(metadata.Value.Trim()).Replace($"%({metadata.Name.LocalName})", previous, StringComparison.OrdinalIgnoreCase);
+                        }
+                    }
+
+                    break;
+
                 case "Choose":
                     foreach (var branch in element.Elements())
                     {
@@ -304,6 +396,17 @@ public sealed partial class ProjectFileReader
                 {
                     var removed = MatchPatterns(remove, directory);
                     _compile.RemoveAll(path => removed(path) && _compileSet.Remove(path));
+                }
+
+                break;
+
+            case "ClCompile" or "ClInclude" or "None" when _projectPath.EndsWith(".vcxproj", StringComparison.OrdinalIgnoreCase) && include.Length != 0:
+                foreach (var path in Glob(include, directory))
+                {
+                    if ((item.Name.LocalName != "None" || CppFiles.IsCppFile(path)) && _cppSourceSet.Add(path))
+                    {
+                        _cppSources.Add(path);
+                    }
                 }
 
                 break;

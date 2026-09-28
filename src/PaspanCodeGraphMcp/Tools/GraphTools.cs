@@ -413,7 +413,7 @@ public sealed class GraphTools
             .ToDictionary(g => g.Key, g => g.ToList());
         var filesByProject = snapshot.Documents.Values.GroupBy(d => d.Project).ToDictionary(g => g.Key, g => g.Count());
         var projects = snapshot.Projects
-            .Where(p => ProjectMatches(p.Name) && (includeTests || !SymbolFormatter.IsTestPath(Path.GetRelativePath(Path.GetDirectoryName(snapshot.RootPath)!, p.Path))))
+            .Where(p => ProjectMatches(p.Name) && (includeTests || !SymbolFormatter.IsTestPath(Path.GetRelativePath(snapshot.Directory, p.Path))))
             .Select(p =>
             {
                 var types = typesByProject.GetValueOrDefault(p.Name) ?? [];
@@ -517,7 +517,9 @@ public sealed class GraphTools
         for (var i = 0; i < graph.Nodes.Count; i++)
         {
             var s = graph.Nodes[i];
-            if (s.Kind != SymbolKind.Method || s.Overrides != null || s.Implements.Count > 0 || (!string.Equals(s.Accessibility, "public", StringComparison.OrdinalIgnoreCase) && s.Name != "Main")
+            // C# public methods and Main; C++ functions and public methods, and main
+            if (s.Kind is not (SymbolKind.Method or SymbolKind.Function) || s.Overrides != null || s.Implements.Count > 0
+                || (!string.Equals(s.Accessibility, "public", StringComparison.OrdinalIgnoreCase) && s.Name is not ("Main" or "main"))
                 || (!includeTests && IsTest(s, snapshot)) || (project != null && !string.Equals(s.Project, project, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
@@ -613,7 +615,7 @@ public sealed class GraphTools
 
     /// <summary>Whether the symbol is in a test file, judged by the path below the solution's directory.</summary>
     private static bool IsTest(CodeSymbol symbol, WorkspaceSnapshot snapshot) =>
-        symbol.Declarations.Count > 0 && SymbolFormatter.IsTestPath(Path.GetRelativePath(Path.GetDirectoryName(snapshot.RootPath)!, symbol.Declarations[0].File));
+        symbol.Declarations.Count > 0 && SymbolFormatter.IsTestPath(Path.GetRelativePath(snapshot.Directory, symbol.Declarations[0].File));
 
     /// <summary>
     /// The source of a declaration, dedented and cut at <paramref name="maxChars"/>; for a type, the lines before

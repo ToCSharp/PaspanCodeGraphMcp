@@ -1,8 +1,8 @@
 namespace PaspanCodeGraph.Workspace;
 
 /// <summary>
-/// Watches the directories of a workspace for changes to what a load reads: C# files, project and solution
-/// files, MSBuild imports and <c>project.assets.json</c>. It reports once the changes stop for a moment, so that
+/// Watches the directories of a workspace for changes to what a load reads: C# and C++ files, project and solution
+/// files, MSBuild imports, <c>project.assets.json</c> and <c>compile_commands.json</c>. It reports once the changes stop for a moment, so that
 /// saving many files (a branch switch, a formatter) gives one update.
 /// </summary>
 public sealed class SourceWatcher : IDisposable
@@ -10,6 +10,7 @@ public sealed class SourceWatcher : IDisposable
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".cs", ".csproj", ".props", ".targets", ".projitems", ".sln", ".slnx",
+        ".vcxproj", ".cpp", ".cc", ".cxx", ".c++", ".cp", ".cppm", ".ixx", ".c", ".h", ".hh", ".hpp", ".hxx", ".h++", ".inl", ".ipp", ".tpp", ".tcc",
     };
 
     private readonly List<FileSystemWatcher> _watchers = [];
@@ -58,7 +59,7 @@ public sealed class SourceWatcher : IDisposable
 
     /// <summary>The directories a workspace's load reads from: the solution's and every project's, and those of files outside them.</summary>
     public static IEnumerable<string> DirectoriesOf(WorkspaceSnapshot snapshot) =>
-        new[] { Path.GetDirectoryName(snapshot.RootPath)! }
+        new[] { snapshot.Directory }
             .Concat(snapshot.Projects.Select(p => p.Directory))
             .Concat(snapshot.Documents.Keys.Select(Path.GetDirectoryName).OfType<string>());
 
@@ -66,7 +67,7 @@ public sealed class SourceWatcher : IDisposable
     public static bool IsRelevant(string path)
     {
         var name = Path.GetFileName(path);
-        if (name.Equals("project.assets.json", StringComparison.OrdinalIgnoreCase))
+        if (name.Equals("project.assets.json", StringComparison.OrdinalIgnoreCase) || name.Equals("compile_commands.json", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }

@@ -27,6 +27,12 @@ public sealed class FileState
     public required IReadOnlySet<string> Names { get; init; }
 
     public required IReadOnlyList<(string TargetId, SymbolReference Reference)> References { get; init; }
+
+    /// <summary>C++: the <c>#define</c> directives of the file (<see cref="PaspanCodeGraph.Cpp.CppParsing.ScanMacros"/>).</summary>
+    public IReadOnlyList<string> CppMacros { get; init; } = [];
+
+    /// <summary>C++: the names the file declares for the parse of other files (<see cref="PaspanCodeGraph.Cpp.CppParsing.Names"/>).</summary>
+    public IReadOnlyList<string> CppNames { get; init; } = [];
 }
 
 /// <summary>Decides which files an update must bind again.</summary>
@@ -44,6 +50,9 @@ public static class IncrementalState
         "Select", "SelectMany", "Where", "OrderBy", "OrderByDescending", "ThenBy", "ThenByDescending",
         "GroupBy", "Join", "GroupJoin", "Cast", "Slice", "Substring", "Length", "Count", "Invoke",
         "AppendLiteral", "AppendFormatted", "Create",
+
+        // C++: range-based for, structured bindings, coroutines
+        "begin", "end", "get", "tuple_size", "tuple_element", "promise_type", "await_ready", "await_suspend", "await_resume",
     };
 
     public static string Hash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content));
@@ -138,6 +147,9 @@ public static class IncrementalState
     /// <summary>A <c>global using</c> directive of a file: changing it changes name lookup in the whole project.</summary>
     public static DeclarationPrint GlobalUsing(string text) => new("global using " + text, "", null, SymbolKind.Namespace, text, Global: true);
 
+    /// <summary>The using-directives a C++ file sees through the files it includes: a change changes lookup in it.</summary>
+    public static DeclarationPrint FileUsings(string namespaces) => new("using namespace " + namespaces, "", null, SymbolKind.Namespace, namespaces, Global: true);
+
     private static DeclarationPrint Print(CodeSymbol symbol)
     {
         var details = new StringBuilder()
@@ -153,7 +165,7 @@ public static class IncrementalState
             .Append(symbol.Signature)
             .ToString();
         var kind = symbol.Kind;
-        var global = kind is SymbolKind.Operator or SymbolKind.Indexer or SymbolKind.Destructor or SymbolKind.Extension
+        var global = kind is SymbolKind.Operator or SymbolKind.Indexer or SymbolKind.Destructor or SymbolKind.Extension or SymbolKind.Macro
             || (kind.IsMember() && PatternNames.Contains(symbol.Name));
         return new DeclarationPrint(symbol.Id, symbol.Name, symbol.ContainingType?.Name, kind, details, global);
     }
