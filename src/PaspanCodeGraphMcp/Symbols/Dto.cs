@@ -43,9 +43,9 @@ public static partial class SymbolFormatter
         symbol.Project,
         symbol.Declarations.Count == 0 ? null : ToLocation(symbol.Declarations[0], snapshot, withLineText));
 
-    /// <summary>The names of a type and its containing types: <c>Outer.Inner</c>.</summary>
+    /// <summary>The names of a type and its containing types: <c>Outer.Inner</c>, in C++ <c>Outer::Inner</c>.</summary>
     public static string QualifiedTypeName(this CodeSymbol type) =>
-        type.ContainingType is { } container ? $"{container.QualifiedTypeName()}.{type.Name}" : type.Name;
+        type.ContainingType is { } container ? $"{container.QualifiedTypeName()}{(type.Language == SourceLanguage.Cpp ? "::" : ".")}{type.Name}" : type.Name;
 
     public static LocationDto ToLocation(SourceLocation location, WorkspaceSnapshot snapshot, bool withLineText = true)
     {
