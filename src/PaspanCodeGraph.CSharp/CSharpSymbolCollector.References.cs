@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using PaspanParsers.CSharp;
 
@@ -436,17 +437,34 @@ public sealed partial class CSharpSymbolCollector
         return offset + System.Text.Encoding.UTF8.GetByteCount(name);
     }
 
+    [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "The server keeps every member of PaspanParsers (TrimmerRootAssembly), whose node types these are.")]
     private static IEnumerable<object?> Children(CSharpNode node)
     {
-        var getters = ChildGetters.GetOrAdd(node.GetType(), static type => type
+        var getters = ChildGetters.GetOrAdd(node.GetType(), static type => DeclarationOrder(type
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.GetIndexParameters().Length == 0 && IsNodeType(p.PropertyType) && p.Name != nameof(NamespaceDeclaration.NullableDirectives))
-            .OrderBy(p => p.MetadataToken)
+            .Where(p => p.GetIndexParameters().Length == 0 && IsNodeType(p.PropertyType) && p.Name != nameof(NamespaceDeclaration.NullableDirectives)))
             .Select(p => (Func<object, object?>)p.GetValue)
             .ToArray());
         foreach (var getter in getters)
         {
             yield return getter(node);
+        }
+    }
+
+    /// <summary>
+    /// Properties in the order they are declared, which is source order for the nodes' parts. NativeAOT has no
+    /// metadata tokens; there reflection lists them in metadata order already.
+    /// </summary>
+    private static IEnumerable<PropertyInfo> DeclarationOrder(IEnumerable<PropertyInfo> properties)
+    {
+        var list = properties.ToList();
+        try
+        {
+            return list.OrderBy(p => p.MetadataToken).ToList();
+        }
+        catch (InvalidOperationException)
+        {
+            return list;
         }
     }
 

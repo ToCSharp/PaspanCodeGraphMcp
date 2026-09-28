@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.ToCSharp/PaspanCodeGraphMcp",
+  "description": "Read-only C# code graph for AI agents: references, call graph, hierarchy and GraphRAG retrieval, without Roslyn or MSBuild.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/ToCSharp/PaspanCodeGraphMcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "nuget",
+      "registryBaseUrl": "https://api.nuget.org",
+      "identifier": "PaspanCodeGraphMcp",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PASPAN_WORKSPACE",
+          "description": "The .sln, .slnx, .csproj or directory to load at startup; without it, the agent calls workspace_load.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "PASPAN_CONFIGURATION",
+          "description": "The build configuration that project conditions and DEBUG/RELEASE depend on (default Debug).",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "PASPAN_WATCH",
+          "description": "0 to stop watching the files for changes.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "PASPAN_CACHE",
+          "description": "0 to stop keeping the graph in .paspan/graph.bin next to the solution.",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

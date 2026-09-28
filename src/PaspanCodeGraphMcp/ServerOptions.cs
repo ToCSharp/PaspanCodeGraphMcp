@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace PaspanCodeGraphMcp;
 
 /// <summary>Process-wide settings, from command-line arguments and then <c>PASPAN_*</c> environment variables.</summary>
@@ -23,8 +25,39 @@ public sealed class ServerOptions
     /// <summary>Where the graph is kept; by default <c>.paspan/graph.bin</c> next to the solution.</summary>
     public string? CachePath { get; init; }
 
+    /// <summary>Print <see cref="Usage"/> instead of serving.</summary>
+    public bool ShowHelp { get; init; }
+
+    /// <summary>Print <see cref="Version"/> instead of serving.</summary>
+    public bool ShowVersion { get; init; }
+
+    /// <summary>The package version, without the commit a build may append.</summary>
+    public static string Version { get; } =
+        typeof(ServerOptions).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0]
+        ?? typeof(ServerOptions).Assembly.GetName().Version?.ToString(3)
+        ?? "0.0.0";
+
+    public const string Usage = """
+        paspan-code-graph-mcp: a read-only MCP server (stdio) for C# code analysis by AI agents.
+
+        Usage: paspan-code-graph-mcp [options] [workspace]
+
+          workspace, -w, --workspace <path>  .sln, .slnx, .csproj or a directory holding one  (PASPAN_WORKSPACE)
+          -c, --configuration <name>         build configuration, default Debug                (PASPAN_CONFIGURATION)
+          -p, --platform <name>              build platform, default AnyCPU                    (PASPAN_PLATFORM)
+          --no-watch                         do not update the graph when files change         (PASPAN_WATCH=0)
+          --no-cache                         do not keep the graph in .paspan/graph.bin        (PASPAN_CACHE=0)
+          --cache <file>                     where to keep the graph                           (PASPAN_CACHE_PATH)
+          --version                          print the version
+          -h, --help                         print this text
+
+        Logs go to stderr (PASPAN_LOG_LEVEL, default Information); stdout carries MCP messages.
+        """;
+
     public static ServerOptions Parse(IReadOnlyList<string> args, Func<string, string?> environment)
     {
+        var help = false;
+        var version = false;
         var workspace = environment("PASPAN_WORKSPACE");
         var configuration = environment("PASPAN_CONFIGURATION") ?? "Debug";
         var platform = environment("PASPAN_PLATFORM") ?? "AnyCPU";
@@ -56,6 +89,12 @@ public sealed class ServerOptions
                 case "--cache":
                     cachePath = Next() ?? cachePath;
                     break;
+                case "--help" or "-h" or "-?":
+                    help = true;
+                    break;
+                case "--version":
+                    version = true;
+                    break;
                 default:
                     if (!arg.StartsWith('-'))
                     {
@@ -74,6 +113,8 @@ public sealed class ServerOptions
             Watch = watch,
             Cache = cache,
             CachePath = string.IsNullOrWhiteSpace(cachePath) ? null : Path.GetFullPath(cachePath),
+            ShowHelp = help,
+            ShowVersion = version,
         };
     }
 

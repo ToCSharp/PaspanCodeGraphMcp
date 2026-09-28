@@ -6,34 +6,96 @@ solutions without MSBuild. It is read-only and talks MCP over stdio.
 
 ## Status
 
-Stages 1 to 6 of the plan: loading a workspace, navigating its declarations, binding type names, the type
+All stages of the plan: loading a workspace, navigating its declarations, binding type names, the type
 hierarchy (base types, overrides, interface implementations), references to types and members, the call
 graph (callers and callees) from the types of expressions, and the types and members of referenced assemblies
 (the framework and NuGet packages) read with System.Reflection.Metadata. The server watches the workspace and
 updates the graph when files change, and keeps the graph on disk so that a restart does not parse everything again.
 On top of the graph, retrieval tools for agents (GraphRAG without an LLM in the server): search by words, context
 within a token budget, impact of a change, paths between symbols, a map of modules, and notes kept by the agent.
+It is packaged as a .NET tool and also builds as a single NativeAOT binary.
 
-## Running
+## Installing
+
+The server is the .NET tool `paspan-code-graph-mcp` (package `PaspanCodeGraphMcp`, .NET 10). Until the package is
+on NuGet.org, build it from a clone:
 
 ```
 git clone --recurse-submodules https://github.com/ToCSharp/PaspanCodeGraphMcp.git
 cd PaspanCodeGraphMcp
-dotnet run --project src/PaspanCodeGraphMcp -- --workspace path/to/Your.slnx
+dotnet pack src/PaspanCodeGraphMcp -c Release -o artifacts
+dotnet tool install --global PaspanCodeGraphMcp --add-source artifacts
+paspan-code-graph-mcp --help
 ```
 
-MCP client configuration:
+Once it is on NuGet.org, `dotnet tool install --global PaspanCodeGraphMcp` installs it, and `dnx PaspanCodeGraphMcp
+--yes -- <arguments>` runs it without installing (the package is marked as an MCP server, with
+`.mcp/server.json` describing it). Without installing anything,
+`dotnet run --project src/PaspanCodeGraphMcp -- <arguments>` runs it from the clone.
+
+A single native binary, which starts without the .NET runtime and loads a little faster:
+
+```
+dotnet publish src/PaspanCodeGraphMcp -c Release -r linux-x64 -p:PublishAot=true -o native
+```
+
+(`win-x64`, `osx-arm64` and so on for other systems; it needs the platform's C toolchain, as NativeAOT does.)
+The binary gives the same answers as the tool: tool results are serialized from source-generated metadata
+(`ToolJson`), and the syntax tree types keep their metadata for the walk over their properties.
+
+## Connecting a client
+
+The server speaks MCP over stdio. Give it the solution with `--workspace` (or let the agent call
+`workspace_load`); paths are best absolute.
+
+Claude Code:
+
+```
+claude mcp add paspan-code-graph -- paspan-code-graph-mcp --workspace /path/to/Your.slnx
+```
+
+(`--scope project` writes it to `.mcp.json` in the repository, for everyone working on it.)
+
+VS Code (`.vscode/mcp.json`):
+
+```json
+{
+  "servers": {
+    "paspan-code-graph": {
+      "type": "stdio",
+      "command": "paspan-code-graph-mcp",
+      "args": ["--workspace", "${workspaceFolder}/Your.slnx"]
+    }
+  }
+}
+```
+
+Claude Desktop (`claude_desktop_config.json`), Cursor (`.cursor/mcp.json`) and other clients that use the
+`mcpServers` form:
 
 ```json
 {
   "mcpServers": {
     "paspan-code-graph": {
-      "command": "dotnet",
-      "args": ["run", "--project", "/path/to/PaspanCodeGraphMcp/src/PaspanCodeGraphMcp", "--", "--workspace", "/path/to/Your.slnx"]
+      "command": "paspan-code-graph-mcp",
+      "args": ["--workspace", "/path/to/Your.slnx"]
     }
   }
 }
 ```
+
+Codex CLI (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.paspan-code-graph]
+command = "paspan-code-graph-mcp"
+args = ["--workspace", "/path/to/Your.slnx"]
+```
+
+For the native binary, `command` is its path; with `dnx`, `command` is `dnx` and the arguments start with
+`PaspanCodeGraphMcp`, `--yes`, `--`.
+
+The options:
 
 | Argument | Environment variable | Default |
 | --- | --- | --- |
@@ -44,6 +106,7 @@ MCP client configuration:
 | `--no-cache`: do not keep the graph on disk | `PASPAN_CACHE=0` | keep it |
 | `--cache <file>`: where to keep the graph | `PASPAN_CACHE_PATH` | `.paspan/graph.bin` next to the solution |
 | | `PASPAN_LOG_LEVEL` | `Information` (logs go to stderr) |
+| `--help`, `--version` | | |
 
 ## Tools
 
@@ -109,8 +172,8 @@ Tests compare the results with Roslyn on the PaspanParsers solution, on this rep
 fixture of hard cases: ids of every declaration, base types, overrides, interface implementations, every identifier
 Roslyn binds to a workspace type, and every reference to a workspace member (names, constructor calls, indexers).
 For member references, exact and inferred ones reach a recall of 98.3% and a precision of 100% on PaspanParsers,
-98.1% and 100% on this repository, and 100% on the fixture. References to members of referenced assemblies reach
-99.2% and 99.7% on PaspanParsers, and 97.7% and 99.2% on this repository. Reading the assemblies brought the
+97.9% and 100% on this repository, and 100% on the fixture. References to members of referenced assemblies reach
+99.2% and 99.7% on PaspanParsers, and 96.8% and 98.9% on this repository. Reading the assemblies brought the
 share of name-only member references of this repository from 19% to 4.5%, and the calls that could not be bound
 at all from 444 to 4; loading it takes about 1.3 s instead of 0.6 s. The ids of every public type and member of
 `System.Runtime`, `System.Collections`, `System.Linq` and `System.Collections.Immutable` match Roslyn's.
@@ -142,10 +205,20 @@ its type) measures how central a symbol is. `search_code` ranks with BM25 over e
 split at case changes and also whole), containing type, namespace, documentation, signature, file name and, for a
 member, the words of its body; terms are stemmed and a query term also matches the terms it begins, and the score is
 raised by up to half for the most central symbols. On 20 questions about this repository with a known answer
-(`SearchQualityTests`), the expected symbol is among the first five results for 19 (mean reciprocal rank 0.76).
+(`SearchQualityTests`), the expected symbol is among the first five results for 19 (mean reciprocal rank 0.73).
 Communities come from the Louvain method over the uses between top-level types; on this repository they separate
 the C#, Java, Python and SQL parsers, the parser combinators, the binder and the server's tools (modularity 0.66).
 There are no embeddings: everything stays managed and local.
+
+## Compared with ZuCSharpMcp
+
+[docs/comparison](docs/comparison/README.md) runs this server and ZuCSharpMcp, the Roslyn-based server it follows,
+on the same solutions over MCP. On Newtonsoft.Json (951 files), the first answer comes 5.3 s after start (2.4 s as
+a native binary, 0.8 s from the graph cache) against 5.7 s, a `find_references` takes about 1 ms against 77 ms, and
+the server uses 496 MB (369 MB native) against 537 MB. Taking ZuCSharpMcp's references as the truth, references
+to a member reach a precision of 94% to 99.6% and a recall of 98% to 99.5% on the three solutions; most of the
+differences are code ZuCSharpMcp treats as inactive (it misses the SDK's `NET6_0_OR_GREATER` symbols) and
+framework members it relates to overrides.
 
 ## How projects are read
 
@@ -153,7 +226,10 @@ Without MSBuild, a project file is evaluated for what matters to parsing: proper
 common forms (`'$(Configuration)|$(Platform)' == 'Debug|AnyCPU'`, `Exists(...)`, `and`, `or`), `Directory.Build.props`,
 imports of files next to the project (such as `.projitems` of shared projects), `Compile` items with wildcards,
 `Remove` and `Exclude`, `ProjectReference`, `DefineConstants`, `LangVersion` and the preprocessor symbols the SDK
-derives from the configuration and target framework (`DEBUG`, `NET`, `NET8_0_OR_GREATER`...). SDK projects compile
+derives from the configuration and target framework (`DEBUG`, `NET`, `NET8_0_OR_GREATER`...). A project with
+several `TargetFrameworks` is read for the first of them, with `TargetFramework` set from the start as in the build
+for that framework, so that properties and `DefineConstants` conditioned on it apply; conditions may use
+`$([MSBuild]::IsTargetFrameworkCompatible(...))`, `GetTargetFrameworkIdentifier` and `GetTargetFrameworkVersion`. SDK projects compile
 `**/*.cs` except under `bin/`, `obj/` and folders starting with `.`. Targets and tasks are not evaluated, so
 sources generated during a build are missing.
 

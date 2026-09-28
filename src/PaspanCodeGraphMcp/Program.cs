@@ -6,6 +6,12 @@ using PaspanCodeGraphMcp;
 using PaspanCodeGraphMcp.Tools;
 
 var options = ServerOptions.Parse(args, Environment.GetEnvironmentVariable);
+if (options.ShowHelp || options.ShowVersion)
+{
+    // Asked from a terminal, not by an MCP client
+    Console.WriteLine(options.ShowHelp ? ServerOptions.Usage : ServerOptions.Version);
+    return;
+}
 
 // The arguments are parsed by ServerOptions; keep them away from the configuration binder
 var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { Args = [] });
@@ -20,7 +26,7 @@ builder.Services.AddSingleton<WorkspaceHost>();
 builder.Services.AddHostedService<StartupLoader>();
 
 builder.Services
-    .AddMcpServer(o => o.ServerInfo = new Implementation { Name = "paspan-code-graph-mcp", Version = "0.1.0" })
+    .AddMcpServer(o => o.ServerInfo = new Implementation { Name = "paspan-code-graph-mcp", Version = ServerOptions.Version })
     .WithStdioServerTransport()
 
     // The SDK hides exception text behind "An error occurred invoking '<tool>'"; the agent needs the reason
@@ -41,11 +47,11 @@ builder.Services
             };
         }
     }))
-    .WithTools<WorkspaceTools>()
-    .WithTools<NavigationTools>()
-    .WithTools<HierarchyTools>()
-    .WithTools<CallGraphTools>()
-    .WithTools<GraphTools>();
+    .WithTools<WorkspaceTools>(ToolJson.Options)
+    .WithTools<NavigationTools>(ToolJson.Options)
+    .WithTools<HierarchyTools>(ToolJson.Options)
+    .WithTools<CallGraphTools>(ToolJson.Options)
+    .WithTools<GraphTools>(ToolJson.Options);
 
 await builder.Build().RunAsync();
 

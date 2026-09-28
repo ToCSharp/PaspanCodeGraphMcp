@@ -12,8 +12,6 @@ public sealed record Annotation(string Target, string Note, DateTimeOffset Updat
 /// </summary>
 public sealed class AnnotationStore
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
-
     private readonly Lock _lock = new();
     private readonly string _file;
     private readonly Dictionary<string, Annotation> _notes;
@@ -44,7 +42,7 @@ public sealed class AnnotationStore
         {
             if (System.IO.File.Exists(file))
             {
-                foreach (var annotation in JsonSerializer.Deserialize<List<Annotation>>(System.IO.File.ReadAllText(file)) ?? [])
+                foreach (var annotation in JsonSerializer.Deserialize(System.IO.File.ReadAllText(file), AnnotationJsonContext.Default.ListAnnotation) ?? [])
                 {
                     notes[annotation.Target] = annotation;
                 }
@@ -93,7 +91,7 @@ public sealed class AnnotationStore
 
             Directory.CreateDirectory(Path.GetDirectoryName(_file)!);
             var temporary = _file + ".tmp";
-            System.IO.File.WriteAllText(temporary, JsonSerializer.Serialize(_notes.Values.OrderBy(a => a.Target, StringComparer.Ordinal).ToList(), JsonOptions));
+            System.IO.File.WriteAllText(temporary, JsonSerializer.Serialize(_notes.Values.OrderBy(a => a.Target, StringComparer.Ordinal).ToList(), AnnotationJsonContext.Default.ListAnnotation));
             System.IO.File.Move(temporary, _file, overwrite: true);
             return annotation;
         }

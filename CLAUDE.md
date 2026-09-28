@@ -17,6 +17,8 @@ Do not use `dotnet test`: the test project uses Microsoft.Testing.Platform, and 
 - `src/PaspanCodeGraph.Workspace`: solution discovery, project file reading without MSBuild, the referenced assemblies of each project (`ReferenceAssemblies`, `DotnetLocator`), parallel parsing into a `WorkspaceSnapshot`. `WorkspaceLoader.Update` makes a new snapshot from an earlier one, binding again only the files `IncrementalState` picks (by the names of changed declarations); `GraphCache` writes a snapshot to `.paspan/graph.bin` and reads it back; `SourceWatcher` reports file changes, which `WorkspaceHost` turns into updates.
 - `src/PaspanCodeGraph.Search`: `CodeGraph` (edges from references and the hierarchy, PageRank, shortest paths, dependents), `SearchIndex` (BM25 with `Tokenizer`), `Communities` (Louvain) and `TypeCommunities`; depends on Core only.
 - `src/PaspanCodeGraphMcp`: the stdio MCP server and its tools; `GraphTools` holds the retrieval tools, over a `GraphRag` built once per `SymbolIndex`, and `AnnotationStore` the notes of `annotate`.
+- The server is the .NET tool `paspan-code-graph-mcp` and also publishes as a NativeAOT binary (`-p:PublishAot=true`). Tool results are serialized with `ToolJson.Options` from `ToolJsonContext`: a new result record goes on it (`PackagingTests` checks the records of the tools' namespaces). The package version is in the csproj and in `.mcp/server.json`; change both.
+- `docs/comparison/compare.py` compares the server with ZuCSharpMcp (Roslyn) over MCP; the results are in `docs/comparison/README.md`.
 - `Directory.Build.props` lives in `src/` (and `tests/` imports it), not at the root, so that it does not apply to the submodule's projects.
 
 ## Oracles
