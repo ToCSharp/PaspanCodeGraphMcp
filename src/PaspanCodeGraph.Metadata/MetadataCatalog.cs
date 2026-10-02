@@ -177,13 +177,21 @@ public sealed class MetadataCatalog
                 if (definition.GetDeclaringType().IsNil && IsVisible(definition.Attributes))
                 {
                     var type = Read(handle, null);
-                    if (type != null && catalog._types.TryAdd(type.Key, type))
+                    if (type == null)
+                    {
+                        continue;
+                    }
+
+                    // A name defined by two assemblies is found as the first one's, but the extension methods
+                    // of both count (MAUI's AppHostBuilderExtensions is in two)
+                    if (catalog._types.TryAdd(type.Key, type))
                     {
                         AddNamespace(type.Namespace);
-                        if (type.HasExtensions)
-                        {
-                            catalog._extensionClasses.Add(type);
-                        }
+                    }
+
+                    if (type.HasExtensions)
+                    {
+                        catalog._extensionClasses.Add(type);
                     }
                 }
             }

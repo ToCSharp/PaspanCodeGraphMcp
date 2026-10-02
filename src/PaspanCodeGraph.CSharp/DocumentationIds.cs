@@ -147,8 +147,8 @@ public static class DocumentationIds
                 break;
 
             case NullableTypeReference nullable:
-                // T? is Nullable<T> only for value types; without binding, only predefined value types are known
-                if (nullable.ElementType is PredefinedTypeReference { Type: not (PredefinedType.Object or PredefinedType.String or PredefinedType.Dynamic) })
+                // T? is Nullable<T> only for value types; without binding, only predefined value types and tuples are known
+                if (nullable.ElementType is PredefinedTypeReference { Type: not (PredefinedType.Object or PredefinedType.String or PredefinedType.Dynamic) } or TupleTypeReference)
                 {
                     builder.Append("System.Nullable{");
                     AppendType(builder, nullable.ElementType, typeParameters, resolveType);

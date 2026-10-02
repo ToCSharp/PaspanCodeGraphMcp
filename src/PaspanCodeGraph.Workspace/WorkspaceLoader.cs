@@ -242,11 +242,21 @@ public static class WorkspaceLoader
             }
         }
 
+        // Sources made from other files (the C# of XAML) are not read from disk
+        var generated = new Dictionary<string, string>(SymbolIndexBuilder.PathComparer);
+        foreach (var project in projects)
+        {
+            foreach (var (file, code) in project.GeneratedSources)
+            {
+                generated.TryAdd(file, code);
+            }
+        }
+
         var contents = new ConcurrentDictionary<string, (ReadOnlyMemory<byte> Utf8, string Hash, string? Failure)>(SymbolIndexBuilder.PathComparer);
         Parallel.ForEach(
             files.Keys,
             new ParallelOptions { CancellationToken = cancellationToken },
-            file => contents[file] = ReadSource(file));
+            file => contents[file] = generated.TryGetValue(file, out var code) ? Generated(code) : ReadSource(file));
 
         // The referenced assemblies of all projects, in one catalog
         var referencesByProject = new Dictionary<string, IReadOnlyList<string>>(SymbolIndexBuilder.PathComparer);
@@ -347,6 +357,7 @@ public static class WorkspaceLoader
         foreach (var project in projects)
         {
             var scope = binder.ProjectScope(project.Name);
+            binder.SetLanguageVersion(project.Name, project.LanguageVersion);
             foreach (var ns in project.Usings)
             {
                 scope.AddNamespace(ns);
@@ -638,6 +649,12 @@ public static class WorkspaceLoader
         {
             return (ReadOnlyMemory<byte>.Empty, "", e.Message);
         }
+    }
+
+    private static (ReadOnlyMemory<byte> Utf8, string Hash, string? Failure) Generated(string code)
+    {
+        var utf8 = Encoding.UTF8.GetBytes(code);
+        return (utf8, IncrementalState.Hash(utf8), null);
     }
 
     /// <summary>Reads and parses one file, with error recovery.</summary>

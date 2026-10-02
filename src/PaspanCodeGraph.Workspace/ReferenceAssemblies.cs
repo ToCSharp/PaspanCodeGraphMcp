@@ -81,8 +81,15 @@ public static partial class ReferenceAssemblies
             major = 0;
         }
 
-        var names = frameworkReferences.Prepend("Microsoft.NETCore.App").Distinct(StringComparer.OrdinalIgnoreCase);
+        // A platform's framework (net10.0-android): its workload's reference pack, which the SDK references implicitly
         var result = new List<string>();
+        if (PlatformPack(packs, project.TargetFramework, major) is { } platform)
+        {
+            frameworkReferences.RemoveAll(f => f.Equals(platform.Framework, StringComparison.OrdinalIgnoreCase));
+            result.AddRange(platform.Assemblies);
+        }
+
+        var names = frameworkReferences.Prepend("Microsoft.NETCore.App").Distinct(StringComparer.OrdinalIgnoreCase);
         foreach (var packName in names.Select(PackFor).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             result.AddRange(Pack(packs, packName, null, major, project, problems) ?? []);
@@ -90,6 +97,43 @@ public static partial class ReferenceAssemblies
 
         return result;
     }
+
+    /// <summary>
+    /// The reference assemblies of an Android target (<c>net10.0-android</c>, <c>net10.0-android35.0</c>): the
+    /// <c>Microsoft.Android.Ref.&lt;API level&gt;</c> pack of the platform version, else the newest one installed with
+    /// assemblies for the .NET version.
+    /// </summary>
+    private static (string Framework, IReadOnlyList<string> Assemblies)? PlatformPack(string packs, string targetFramework, int major)
+    {
+        var match = PlatformPattern().Match(targetFramework.ToLowerInvariant());
+        if (!match.Success || match.Groups[1].Value != "android" || !Directory.Exists(packs))
+        {
+            return null;
+        }
+
+        var apiLevel = int.TryParse(match.Groups[2].Value.Split('.')[0], out var level) ? level : 0;
+        var folder = $"net{major}.0";
+        var candidates = Directory.EnumerateDirectories(packs, "Microsoft.Android.Ref.*")
+            .Select(d => (Path: d, Level: int.TryParse(Path.GetFileName(d)["Microsoft.Android.Ref.".Length..], out var l) ? l : -1))
+            .Where(c => c.Level >= 0 && (apiLevel == 0 || c.Level == apiLevel))
+            .OrderByDescending(c => c.Level);
+        foreach (var (path, _) in candidates)
+        {
+            var versions = Directory.EnumerateDirectories(path)
+                .OrderByDescending(d => Version.TryParse(Path.GetFileName(d).Split('-')[0], out var v) ? v : new Version())
+                .Select(d => Path.Combine(d, "ref", folder))
+                .Where(Directory.Exists);
+            if (versions.FirstOrDefault() is { } refDirectory)
+            {
+                return ("Microsoft.Android", Directory.EnumerateFiles(refDirectory, "*.dll").Order(StringComparer.Ordinal).ToList());
+            }
+        }
+
+        return null;
+    }
+
+    [GeneratedRegex(@"^net\d+\.\d+-([a-z]+)([\d.]*)$")]
+    private static partial Regex PlatformPattern();
 
     /// <summary>The dlls of a pack's ref folder, for <paramref name="major"/> (the newest version when missing or 0).</summary>
     private static IReadOnlyList<string>? Pack(string packs, string packName, string? folder, int? major, ProjectModel project, List<LoadProblem> problems)

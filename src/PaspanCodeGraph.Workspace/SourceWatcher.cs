@@ -9,7 +9,7 @@ public sealed class SourceWatcher : IDisposable
 {
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".cs", ".csproj", ".props", ".targets", ".projitems", ".sln", ".slnx",
+        ".cs", ".csproj", ".props", ".targets", ".projitems", ".sln", ".slnx", ".xaml",
         ".vcxproj", ".cpp", ".cc", ".cxx", ".c++", ".cp", ".cppm", ".ixx", ".c", ".h", ".hh", ".hpp", ".hxx", ".h++", ".inl", ".ipp", ".tpp", ".tcc",
     };
 

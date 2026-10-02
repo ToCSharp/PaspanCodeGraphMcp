@@ -727,6 +727,15 @@ public sealed partial class CSharpBinder
             return 1;
         }
 
+        if (from is MethodGroupType group)
+        {
+            // A method group converts to a delegate type with a method whose parameters and return type fit
+            return DelegateSignature(to) is { } signature ? group.Methods.Max(m => MethodGroupConversion(m, signature))
+                : to is ExternalType { Name: "Delegate" or "MulticastDelegate" } ? 1
+                : to is NamedType || SemTypes.IsPredefined(to.Underlying) || to.Underlying is ExternalType { Definition: not null } ? -1
+                : 0;
+        }
+
         if (Equals(from, to))
         {
             return 2;
@@ -739,8 +748,15 @@ public sealed partial class CSharpBinder
 
         if (to is NullableType nullableTo)
         {
+            // T to T? is a conversion for a value type, the same type for an annotated reference type
             var inner = Conversion(from.Underlying, nullableTo.Element);
-            return inner == 2 ? 1 : inner;
+            return inner == 2 && IsValueType(nullableTo.Element.Underlying) ? 1 : inner;
+        }
+
+        if (from is NullableType && IsValueType(from.Underlying) && IsValueType(to))
+        {
+            // A nullable value type converts to a value type only explicitly: int? is no int
+            return -1;
         }
 
         from = from.Underlying;
@@ -770,7 +786,9 @@ public sealed partial class CSharpBinder
         switch (from, to)
         {
             case (ExternalType a, ExternalType b) when a.Name == b.Name && a.Arguments.Count == b.Arguments.Count:
-                return a.Arguments.Zip(b.Arguments).Any(p => Conversion(p.First, p.Second) < 0 && !IsVariant(b.Name)) ? -1 : 1;
+                // The same type when the arguments differ only in nullable annotations (List<string?> and List<string>)
+                return a.Arguments.Zip(b.Arguments).All(p => Conversion(p.First, p.Second) == 2) ? 2
+                    : ArgumentsConvert(a.Arguments, b.Arguments, b.Name) ? 1 : -1;
             case (ExternalType a, ExternalType b) when a.Arguments.Count == 0 && NumericWidening.TryGetValue(a.Name, out var wider):
                 return wider.Contains(b.Name) ? 1 : SemTypes.IsPredefined(b) ? -1 : 0;
             case (ExternalType a, ExternalType b) when SemTypes.IsPredefined(a) && SemTypes.IsPredefined(b):
@@ -798,6 +816,7 @@ public sealed partial class CSharpBinder
                 }
 
                 var sawExternal = false;
+                var sawOther = false;
                 foreach (var ancestor in Ancestors(a))
                 {
                     if (ancestor is ExternalType external)
@@ -806,9 +825,20 @@ public sealed partial class CSharpBinder
                         sawExternal |= DefinitionOf(external) == null;
                         if (external.Name == b.Name && external.Arguments.Count == b.Arguments.Count)
                         {
-                            return 1;
+                            if (ArgumentsConvert(external.Arguments, b.Arguments, b.Name))
+                            {
+                                return 1;
+                            }
+
+                            sawOther = true;
                         }
                     }
+                }
+
+                if (sawOther)
+                {
+                    // The interface with other type arguments: IEnumerable<int> is no IEnumerable<long>
+                    return -1;
                 }
 
                 if (DefinitionOf(b) is { } target && HasExternalConversion(target))
@@ -834,22 +864,22 @@ public sealed partial class CSharpBinder
             }
 
             case (ArrayType a, ArrayType b):
-                return a.Rank != b.Rank ? -1 : Math.Min(1, Conversion(a.Element, b.Element));
+                return a.Rank != b.Rank ? -1 : ReferenceConversion(a.Element, b.Element) is var element && element == 2 ? 2 : Math.Min(1, element);
             case (ArrayType a, ExternalType b) when DefinitionOf(b) is { } arrayTarget:
                 return arrayTarget.Namespace switch
                 {
                     "System" when b.Name is "Array" or "ICloneable" => 1,
                     "System.Collections" when b.Name is "IEnumerable" or "ICollection" or "IList" or "IStructuralComparable" or "IStructuralEquatable" => 1,
                     "System.Collections.Generic" when b.Arguments.Count == 1 && b.Name is "IEnumerable" or "ICollection" or "IList" or "IReadOnlyCollection" or "IReadOnlyList"
-                        => a.Rank == 1 ? Math.Min(1, Conversion(a.Element, b.Arguments[0])) : -1,
+                        => a.Rank == 1 ? Math.Min(1, ReferenceConversion(a.Element, b.Arguments[0])) : -1,
                     // T[] to Span<T>, ReadOnlySpan<T>, Memory<T>...: a conversion operator of the target taking an array
                     _ => arrayTarget.Members.Any(m => m.Kind == MetadataMemberKind.Operator && m.Name == "op_Implicit" && m.Parameters is [{ Type: MetaArray }])
-                        ? (b.Arguments.Count == 1 ? Math.Min(1, Conversion(a.Element, b.Arguments[0])) : 0)
+                        ? (b.Arguments.Count == 1 ? Math.Min(1, ReferenceConversion(a.Element, b.Arguments[0])) : 0)
                         : -1,
                 };
             case (ArrayType a, ExternalType b):
                 return b.Name is "Array" or "ICloneable" ? 1
-                    : b.Arguments.Count == 1 && SemTypes.ElementOf(b) != null ? Math.Min(1, Conversion(a.Element, b.Arguments[0]))
+                    : b.Arguments.Count == 1 && SemTypes.ElementOf(b) != null ? Math.Min(1, ReferenceConversion(a.Element, b.Arguments[0]))
                     : b.Arguments.Count == 0 && b.Name is "IEnumerable" or "ICollection" or "IList" ? 1
                     : -1;
             case (ExternalType { Name: "String" }, ArrayType):
@@ -884,6 +914,51 @@ public sealed partial class CSharpBinder
         }
     }
 
+    /// <summary>
+    /// Whether a method of a method group converts to a delegate with <paramref name="signature"/>: as many
+    /// parameters, each delegate parameter converting to the method's, and the method's return type to the delegate's.
+    /// 1 when it does, 0 when not known, -1 when it does not.
+    /// </summary>
+    public int MethodGroupConversion(MethodSignature method, (IReadOnlyList<SemType> Parameters, SemType Return) signature)
+    {
+        if (signature.Parameters.Count < method.Required || signature.Parameters.Count > method.Parameters.Count)
+        {
+            return -1;
+        }
+
+        var result = 1;
+        for (var i = 0; i < signature.Parameters.Count; i++)
+        {
+            var conversion = ReferenceConversion(signature.Parameters[i], method.Parameters[i]);
+            if (conversion < 0)
+            {
+                return -1;
+            }
+
+            result = Math.Min(result, conversion);
+        }
+
+        if (signature.Return != SemType.Void)
+        {
+            var conversion = method.Return == SemType.Void ? -1 : ReferenceConversion(method.Return, signature.Return);
+            if (conversion < 0)
+            {
+                return -1;
+            }
+
+            result = Math.Min(result, conversion);
+        }
+
+        return result;
+    }
+
+    /// <summary>An identity or implicit reference conversion, the only ones a method group's parameters and return type allow.</summary>
+    private int ReferenceConversion(SemType from, SemType to)
+    {
+        var conversion = Conversion(from, to);
+        return conversion == 1 && (IsValueType(from.Underlying) || IsValueType(to.Underlying)) ? -1 : conversion;
+    }
+
     /// <summary>A conversion between two types from references: to a base type or interface, or a user-defined one.</summary>
     private int ExternalConversion(ExternalType from, ExternalType to, MetadataType fromDefinition, MetadataType toDefinition)
     {
@@ -916,10 +991,14 @@ public sealed partial class CSharpBinder
 
     /// <summary>
     /// Whether the type arguments of a generic type allow converting to <paramref name="to"/>: identical, or, for a
-    /// variant interface or delegate, converting (not failing to convert) one by one.
+    /// variant interface or delegate, converting (not failing to convert) one by one by a reference conversion, in
+    /// either direction (inputs are contravariant): IEnumerable&lt;string&gt; is an IEnumerable&lt;object&gt;, but
+    /// IEnumerable&lt;int&gt; is no IEnumerable&lt;long&gt;.
     /// </summary>
     private bool ArgumentsConvert(IReadOnlyList<SemType> from, IReadOnlyList<SemType> to, string name) =>
-        IsVariant(name) ? from.Zip(to).All(p => Conversion(p.First, p.Second) >= 0) : from.Zip(to).All(p => Conversion(p.First, p.Second) >= 0 && (Conversion(p.Second, p.First) >= 0 || p.First.IsUnknown));
+        IsVariant(name)
+            ? from.Zip(to).All(p => ReferenceConversion(p.First, p.Second) >= 0 || ReferenceConversion(p.Second, p.First) >= 0)
+            : from.Zip(to).All(p => Conversion(p.First, p.Second) >= 0 && (Conversion(p.Second, p.First) >= 0 || p.First.IsUnknown));
 
     private static bool IsVariant(string name) => name is "IEnumerable" or "IReadOnlyList" or "IReadOnlyCollection" or "Func" or "Action" or "IEnumerator" or "IQueryable" or "Predicate" or "IComparer" or "IEqualityComparer" or "IComparable";
 
@@ -969,6 +1048,10 @@ public sealed partial class CSharpBinder
                 var map = ArgumentMap(symbol, external.Arguments);
                 return (Parameters(symbol).Select(p => SemTypes.Substitute(p.Type, map)).ToList(), SemTypes.Substitute(MemberType(symbol), map));
             }
+
+            case MethodGroupType { Methods: [var method] }:
+                // A method group of one method has its signature as its natural type (var f = Local;)
+                return (method.Parameters, method.Return);
 
             default:
                 return null;

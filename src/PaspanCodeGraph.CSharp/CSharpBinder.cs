@@ -182,6 +182,25 @@ public sealed partial class CSharpBinder
         }
     }
 
+    private readonly Dictionary<string, CSharpLanguageVersion> _languageVersions = new(StringComparer.Ordinal);
+
+    /// <summary>The C# version of <paramref name="project"/>'s files, for the rules that changed (first-class spans in C# 14).</summary>
+    public CSharpLanguageVersion LanguageVersion(string project)
+    {
+        lock (_languageVersions)
+        {
+            return _languageVersions.GetValueOrDefault(project, CSharpLanguageVersion.Latest);
+        }
+    }
+
+    public void SetLanguageVersion(string project, CSharpLanguageVersion version)
+    {
+        lock (_languageVersions)
+        {
+            _languageVersions[project] = version;
+        }
+    }
+
     /// <summary>Remembers the base list of one declaration of a type, to bind once every type is known.</summary>
     public void AddBaseReferences(CodeSymbol type, BindingContext context, IEnumerable<(TypeReference Type, string Written)> bases)
     {

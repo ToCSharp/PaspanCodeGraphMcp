@@ -37,6 +37,12 @@ public sealed record ProjectModel(
     /// <summary>The intermediate output directory, where NuGet restore writes <c>project.assets.json</c>.</summary>
     public string IntermediateOutputPath { get; init; } = "";
 
+    /// <summary>
+    /// Sources the project compiles that are made here rather than read: the C# of each XAML file, by the XAML
+    /// file's path (which <see cref="Sources"/> lists).
+    /// </summary>
+    public IReadOnlyDictionary<string, string> GeneratedSources { get; init; } = new Dictionary<string, string>();
+
     public string Directory => System.IO.Directory.Exists(Path) ? Path : System.IO.Path.GetDirectoryName(Path)!;
 
     /// <summary>The language of the sources: C# for .csproj projects, C++ for .vcxproj, compile_commands.json and folders.</summary>
@@ -177,8 +183,31 @@ public sealed partial class ProjectFileReader
             targetFramework = "net" + version.TrimStart('v', 'V').Replace(".", "");
         }
 
+        // What the build generates: C# bound from Java libraries, and the code of XAML files
+        var name = Expand("$(AssemblyName)") is { Length: > 0 } assemblyName ? assemblyName : _properties["MSBuildProjectName"];
+        var baseIntermediate = Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(Expand("$(BaseIntermediateOutputPath)") is { Length: > 0 } obj ? obj : "obj")));
+        var intermediate = isSdk ? IntermediateDirectory(baseIntermediate, targetFramework) : null;
+        foreach (var path in BindingSources(intermediate))
+        {
+            if (_compileSet.Add(path))
+            {
+                _compile.Add(path);
+            }
+        }
+
+        var generated = new Dictionary<string, string>(SymbolIndexBuilder.PathComparer);
+        var wpf = IsTrueProperty("UseWPF") || _wpfItems;
+        foreach (var path in XamlFiles(isSdk))
+        {
+            if (XamlCode(path, wpf) is { } code && _compileSet.Add(path))
+            {
+                _compile.Add(path);
+                generated[path] = code;
+            }
+        }
+
         return new ProjectModel(
-            Expand("$(AssemblyName)") is { Length: > 0 } assemblyName ? assemblyName : _properties["MSBuildProjectName"],
+            name,
             _projectPath,
             targetFramework,
             ParseLanguageVersion(Expand("$(LangVersion)")),
@@ -187,12 +216,13 @@ public sealed partial class ProjectFileReader
             _references,
             _problems)
         {
-            Usings = Usings(isSdk),
+            Usings = Usings(isSdk, BuiltGlobalUsings(intermediate, name)),
             Sdk = _sdk,
             PackageReferences = _packages,
             FrameworkReferences = _frameworkReferences,
             AssemblyReferences = _assemblyReferences,
-            IntermediateOutputPath = Path.GetFullPath(Path.Combine(directory, SolutionDiscovery.NormalizeSeparators(Expand("$(BaseIntermediateOutputPath)") is { Length: > 0 } obj ? obj : "obj"))),
+            IntermediateOutputPath = baseIntermediate,
+            GeneratedSources = generated,
         };
     }
 
@@ -436,6 +466,17 @@ public sealed partial class ProjectFileReader
                 break;
             }
 
+            case "MauiXaml" or "Page" or "ApplicationDefinition" when include.Length != 0:
+                _xamlItems.AddRange(Glob(include, directory).Where(p => p.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase)));
+                _wpfItems |= item.Name.LocalName != "MauiXaml";
+                break;
+
+            case "AndroidLibrary" or "EmbeddedJar" or "InputJar" or "LibraryProjectZip" or "AndroidAarLibrary" when include.Length != 0:
+                // An AndroidLibrary binds unless Bind="false"
+                _bindsJava |= item.Name.LocalName != "AndroidLibrary"
+                    || !string.Equals((string?)item.Attribute("Bind") ?? item.Elements().FirstOrDefault(e => e.Name.LocalName == "Bind")?.Value, "false", StringComparison.OrdinalIgnoreCase);
+                break;
+
             case "FrameworkReference":
                 foreach (var name in Split(include))
                 {
@@ -497,8 +538,8 @@ public sealed partial class ProjectFileReader
         }
     }
 
-    /// <summary>The .cs files under <paramref name="directory"/>, skipping excluded and hidden ('.') directories.</summary>
-    private static IEnumerable<string> EnumerateSources(string directory, List<string> excludedDirectories)
+    /// <summary>The files matching <paramref name="pattern"/> under <paramref name="directory"/>, skipping excluded and hidden ('.') directories.</summary>
+    private static IEnumerable<string> EnumerateSources(string directory, List<string> excludedDirectories, string pattern = "*.cs")
     {
         var pending = new Stack<string>();
         pending.Push(directory);
@@ -508,7 +549,7 @@ public sealed partial class ProjectFileReader
             string[] files, subdirectories;
             try
             {
-                files = System.IO.Directory.GetFiles(current, "*.cs");
+                files = System.IO.Directory.GetFiles(current, pattern);
                 subdirectories = System.IO.Directory.GetDirectories(current);
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException)
@@ -537,12 +578,19 @@ public sealed partial class ProjectFileReader
         }
     }
 
-    /// <summary>The implicit usings of the SDK (when <c>ImplicitUsings</c> is on) and the <c>Using</c> items.</summary>
-    private List<string> Usings(bool isSdk)
+    /// <summary>
+    /// The implicit usings of the SDK (when <c>ImplicitUsings</c> is on) and the <c>Using</c> items; those the last
+    /// build wrote (<paramref name="built"/>) instead of the SDK's, when there, as they include the packages' too.
+    /// </summary>
+    private List<string> Usings(bool isSdk, List<string>? built)
     {
         var usings = new List<string>();
         var implicitUsings = Expand("$(ImplicitUsings)");
-        if (isSdk && (implicitUsings.Equals("enable", StringComparison.OrdinalIgnoreCase) || implicitUsings.Equals("true", StringComparison.OrdinalIgnoreCase)))
+        if (built != null)
+        {
+            usings.AddRange(built);
+        }
+        else if (isSdk && (implicitUsings.Equals("enable", StringComparison.OrdinalIgnoreCase) || implicitUsings.Equals("true", StringComparison.OrdinalIgnoreCase)))
         {
             usings.AddRange(["System", "System.Collections.Generic", "System.IO", "System.Linq", "System.Net.Http", "System.Threading", "System.Threading.Tasks"]);
             if (_sdk.StartsWith("Microsoft.NET.Sdk.Web", StringComparison.OrdinalIgnoreCase))

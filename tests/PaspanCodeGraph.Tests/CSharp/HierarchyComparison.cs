@@ -360,6 +360,7 @@ internal static class HierarchyComparison
             IPropertySymbol or IFieldSymbol or IEventSymbol => symbol.OriginalDefinition,
             _ => null,
         };
-        return member != null && (external ? !IsSource(member) && member.ContainingType is { IsTupleType: false, IsAnonymousType: false } : IsSource(member) && !member.IsImplicitlyDeclared) ? member : null;
+        return member != null && member.ContainingType is not { IsAnonymousType: true }
+            && (external ? !IsSource(member) && member.ContainingType is { IsTupleType: false } : IsSource(member) && !member.IsImplicitlyDeclared) ? member : null;
     }
 }

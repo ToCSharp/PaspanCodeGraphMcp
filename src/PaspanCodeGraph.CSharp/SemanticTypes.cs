@@ -92,6 +92,15 @@ public sealed record NamespaceExpressionType(string Namespace) : SemType;
 /// <summary>A lambda or anonymous method, whose type comes from where it is converted to.</summary>
 public sealed record LambdaType(int ParameterCount) : SemType;
 
+/// <summary>
+/// A method's name not invoked, which converts to a delegate type through one of its methods. <paramref name="Offset"/>
+/// is where the name is, to record the method the conversion chooses (-1 for a local function, which is not recorded).
+/// </summary>
+public sealed record MethodGroupType(IReadOnlyList<MethodSignature> Methods, int Offset, bool ReceiverExact) : SemType;
+
+/// <summary>A method of a method group: its parameter and return types, and the member (null for a local function).</summary>
+public sealed record MethodSignature(IReadOnlyList<SemType> Parameters, int Required, SemType Return, FoundMember? Member);
+
 public static class SemTypes
 {
     private static readonly Dictionary<string, string> PredefinedNames = new(StringComparer.Ordinal)
@@ -225,11 +234,11 @@ public static class SemTypes
         }
     }
 
-    /// <summary>What <c>await</c> gives for a task type; null when not a known task type.</summary>
+    /// <summary>What <c>await</c> gives for a task type (also configured with <c>ConfigureAwait</c>); null when not a known task type.</summary>
     public static SemType? Awaited(SemType type) => type.Underlying switch
     {
-        ExternalType { Name: "Task" or "ValueTask", Arguments.Count: 1 } task => task.Arguments[0],
-        ExternalType { Name: "Task" or "ValueTask", Arguments.Count: 0 } => SemType.Void,
+        ExternalType { Name: "Task" or "ValueTask" or "ConfiguredTaskAwaitable" or "ConfiguredValueTaskAwaitable", Arguments.Count: 1 } task => task.Arguments[0],
+        ExternalType { Name: "Task" or "ValueTask" or "ConfiguredTaskAwaitable" or "ConfiguredValueTaskAwaitable", Arguments.Count: 0 } => SemType.Void,
         _ => null,
     };
 
@@ -302,7 +311,8 @@ public static class SemTypes
         {
             if (receiver.Underlying is ExternalType { Name: "Task" or "ValueTask" } task && name == "ConfigureAwait")
             {
-                return (null, _ => new ExternalType("ConfiguredTaskAwaitable", "ConfiguredTaskAwaitable", task.Arguments));
+                var configured = task.Name == "Task" ? "ConfiguredTaskAwaitable" : "ConfiguredValueTaskAwaitable";
+                return (null, _ => new ExternalType(configured, "System.Runtime.CompilerServices." + configured, task.Arguments));
             }
 
             return null;

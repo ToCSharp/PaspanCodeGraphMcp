@@ -12,7 +12,7 @@ public sealed partial class CSharpSymbolCollector
     private readonly List<(string TargetId, SymbolReference Reference)> _references = [];
 
     /// <summary>Names bound in expressions, so that a member access chain binds its target once.</summary>
-    private readonly Dictionary<Expression, BoundName?> _boundExpressions = new(ReferenceEqualityComparer.Instance);
+    private readonly BindingCache<Expression, BoundName?> _boundExpressions = new(ReferenceEqualityComparer.Instance);
 
     /// <summary>The child nodes of each node type, read through its public properties.</summary>
     private static readonly ConcurrentDictionary<Type, Func<object, object?>[]> ChildGetters = new();

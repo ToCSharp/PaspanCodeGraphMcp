@@ -159,7 +159,11 @@ Bodies are bound with the types of expressions: locals, parameters, patterns, `f
 lambda parameters typed from the delegate they convert to are tracked; member lookup follows base classes and type
 parameter constraints with generic arguments substituted; overload resolution picks among candidates by argument
 count, named arguments, `params`, conversions and the tie-break rules (non-generic, non-expanded, more specific),
-and infers method type arguments from arguments and lambda results; extension methods of the namespaces in scope,
+and infers method type arguments from arguments and lambda results. When candidates differ only in the delegate
+a lambda converts to (`Sum(x => x.Size)`, `Task.Run(() => GetAsync())`), the lambda is bound with each candidate's
+parameter types, without recording anything, to compare what it returns; a method group (also a local function)
+converts through a method whose parameters fit, integer constants convert to narrower types when their value fits,
+and in C# 14 an array goes to a span before an interface. Top-level statements are one method. Extension methods of the namespaces in scope,
 `using static`, object and collection initializers, indexers, constructor initializers, primary constructors,
 target-typed `new()`, deconstruction and records are handled.
 
@@ -178,9 +182,10 @@ overloads could not be told apart). Tools show `Exact` and `Inferred` by default
 Tests compare the results with Roslyn on the PaspanParsers solution, on this repository's own solution and on a
 fixture of hard cases: ids of every declaration, base types, overrides, interface implementations, every identifier
 Roslyn binds to a workspace type, and every reference to a workspace member (names, constructor calls, indexers).
-For member references, exact and inferred ones reach a recall of 98.3% and a precision of 100% on PaspanParsers,
-97.9% and 100% on this repository, and 100% on the fixture. References to members of referenced assemblies reach
-99.2% and 99.7% on PaspanParsers, and 96.8% and 98.9% on this repository. Reading the assemblies brought the
+For member references, exact and inferred ones reach a recall of 99.0% and a precision of 100% on PaspanParsers,
+99.1% and 100% on this repository, and 100% on the fixtures. References to members of referenced assemblies reach
+99.6% and 99.7% on PaspanParsers, and 99.2% and 99.6% on this repository. On a MAUI, WPF and Android solution of
+31,000 references to workspace members, every one is bound to the member Roslyn binds it to. Reading the assemblies brought the
 share of name-only member references of this repository from 19% to 4.5%, and the calls that could not be bound
 at all from 444 to 4; loading it takes about 1.3 s instead of 0.6 s. The ids of every public type and member of
 `System.Runtime`, `System.Collections`, `System.Linq` and `System.Collections.Immutable` match Roslyn's.
@@ -299,12 +304,20 @@ derives from the configuration and target framework (`DEBUG`, `NET`, `NET8_0_OR_
 several `TargetFrameworks` is read for the first of them, with `TargetFramework` set from the start as in the build
 for that framework, so that properties and `DefineConstants` conditioned on it apply; conditions may use
 `$([MSBuild]::IsTargetFrameworkCompatible(...))`, `GetTargetFrameworkIdentifier` and `GetTargetFrameworkVersion`. SDK projects compile
-`**/*.cs` except under `bin/`, `obj/` and folders starting with `.`. Targets and tasks are not evaluated, so
-sources generated during a build are missing.
+`**/*.cs` except under `bin/`, `obj/` and folders starting with `.`. Targets and tasks are not evaluated, so most
+sources generated during a build are missing, except for three kinds:
+- The global usings come from the `<Assembly>.GlobalUsings.g.cs` the last build wrote, when there is one, which
+  includes those added by packages (MAUI's).
+- An Android binding project (with `AndroidLibrary` items to bind) compiles the C# the build generated from its
+  Java libraries under `obj/.../generated/src`.
+- For each XAML file with an `x:Class` in a MAUI or WPF project, a part of the class is made with a field for each
+  `x:Name` (and WPF's `Name`) outside templates, typed by its element, and with `InitializeComponent`. It is read as
+  the XAML file itself, each field written on the line and at the column of its name, so declarations point into
+  the XAML.
 
 The assemblies a project compiles against are found the same way: the reference packs of the SDK
 (`dotnet/packs/Microsoft.NETCore.App.Ref`, and `Microsoft.AspNetCore.App.Ref` for web projects or a
-`FrameworkReference`), the package assemblies `obj/project.assets.json` lists after a restore or, without it, those
+`FrameworkReference`; `Microsoft.Android.Ref.<API level>` of the Android workload for `net10.0-android`), the package assemblies `obj/project.assets.json` lists after a restore or, without it, those
 of the `PackageReference` items and their dependencies in the NuGet cache (with the `Reference` items their
 `.targets` files add), and `Reference` items with a `HintPath`. The SDK is found through `DOTNET_ROOT`, then
 `dotnet` on the `PATH`. Missing packs and packages are reported as load problems.

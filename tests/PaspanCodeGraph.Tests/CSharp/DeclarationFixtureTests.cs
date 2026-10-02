@@ -52,6 +52,7 @@ public sealed class DeclarationFixtureTests
                 public void Arrays(int[] a, int[,] b, int[][] c, T[] d) { }
                 public void Nullables(int? a, T? b, string? c) { }
                 public (int, string) Tuple((int Id, T Value) item, (int, int, int, int, int, int, int, int) wide) => default;
+                public void NullableTuple(out (string Reg, long Delta)? writeback, (int, int)?[] pairs) { writeback = null; }
                 public void Dynamic(dynamic d, nint n, nuint u) { }
 
                 public static Box<T> operator +(Box<T> a, Box<T> b) => a;

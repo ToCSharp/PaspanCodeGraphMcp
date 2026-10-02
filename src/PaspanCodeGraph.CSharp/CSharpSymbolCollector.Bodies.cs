@@ -56,7 +56,129 @@ public sealed partial class CSharpSymbolCollector
     /// <summary>The types of the expressions returned by the lambda being bound, to infer its return type.</summary>
     private List<SemType>? _lambdaReturns;
 
-    private readonly Dictionary<Expression, Bound> _bound = new(ReferenceEqualityComparer.Instance);
+    private readonly BindingCache<Expression, Bound> _bound = new(ReferenceEqualityComparer.Instance);
+
+    /// <summary>What lambdas return with given parameter types, found by binding them speculatively.</summary>
+    private readonly BindingCache<LambdaKey, SemType?> _lambdaResults = new(EqualityComparer<LambdaKey>.Default);
+
+    /// <summary>How many speculative bindings are running, one in another.</summary>
+    private int _speculation;
+
+    private const int MaxSpeculation = 3;
+
+    /// <summary>The argument being bound, whose method group is recorded once the parameter it goes to is known.</summary>
+    private Expression? _methodGroupArgument;
+
+    /// <summary>
+    /// A cache of what nodes bound to. Writes made while a speculative binding runs are journaled, and undone
+    /// when it ends, so that binding a lambda to try a candidate leaves nothing behind.
+    /// </summary>
+    private sealed class BindingCache<TKey, TValue>(IEqualityComparer<TKey> comparer)
+        where TKey : notnull
+    {
+        private readonly Dictionary<TKey, TValue> _values = new(comparer);
+        private List<(TKey Key, bool Had, TValue Old)>? _journal;
+
+        public bool TryGetValue(TKey key, out TValue value) => _values.TryGetValue(key, out value!);
+
+        public TValue this[TKey key]
+        {
+            set
+            {
+                _journal?.Add((key, _values.TryGetValue(key, out var old), old!));
+                _values[key] = value;
+            }
+        }
+
+        /// <summary>Starts journaling; returns the journal of the enclosing speculation.</summary>
+        public List<(TKey Key, bool Had, TValue Old)>? Begin()
+        {
+            var outer = _journal;
+            _journal = [];
+            return outer;
+        }
+
+        /// <summary>Undoes the writes since <see cref="Begin"/> and goes back to the enclosing journal.</summary>
+        public void Undo(List<(TKey Key, bool Had, TValue Old)>? outer)
+        {
+            for (var i = _journal!.Count - 1; i >= 0; i--)
+            {
+                var (key, had, old) = _journal[i];
+                if (had)
+                {
+                    _values[key] = old;
+                }
+                else
+                {
+                    _values.Remove(key);
+                }
+            }
+
+            _journal = outer;
+        }
+    }
+
+    /// <summary>A lambda with the types of its parameters.</summary>
+    private sealed record LambdaKey(Expression Lambda, IReadOnlyList<SemType> Parameters)
+    {
+        public bool Equals(LambdaKey? other) => other is not null && ReferenceEquals(other.Lambda, Lambda) && SemTypes.SameList(other.Parameters, Parameters);
+
+        public override int GetHashCode() => HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Lambda), Parameters.Count);
+    }
+
+    /// <summary>Runs a binding whose results are not kept: the references it records and what it caches are undone.</summary>
+    private T Speculate<T>(Func<T> bind)
+    {
+        var references = _references.Count;
+        var bound = _bound.Begin();
+        var names = _boundExpressions.Begin();
+        var lambdas = _lambdaResults.Begin();
+        var locals = _locals;
+        var returnType = _returnType;
+        var returns = _lambdaReturns;
+        _speculation++;
+        try
+        {
+            return bind();
+        }
+        finally
+        {
+            _speculation--;
+            _bound.Undo(bound);
+            _boundExpressions.Undo(names);
+            _lambdaResults.Undo(lambdas);
+            _references.RemoveRange(references, _references.Count - references);
+            _locals = locals;
+            _returnType = returnType;
+            _lambdaReturns = returns;
+        }
+    }
+
+    /// <summary>
+    /// What a lambda returns when its parameters have <paramref name="parameters"/> types: the type of its result,
+    /// <see cref="SemType.Void"/> when it returns no value, null when not known.
+    /// </summary>
+    private SemType? LambdaResult(Expression lambda, IReadOnlyList<SemType> parameters, BindingContext context, string? inMember)
+    {
+        var key = new LambdaKey(lambda, parameters);
+        if (_lambdaResults.TryGetValue(key, out var known))
+        {
+            return known;
+        }
+
+        if (_speculation >= MaxSpeculation)
+        {
+            return null;
+        }
+
+        var result = Speculate(() =>
+        {
+            BindLambda(lambda, context, inMember, (parameters, SemType.Unknown), out var returned);
+            return returned;
+        });
+        _lambdaResults[key] = result;
+        return result;
+    }
 
     // ========================================
     // Members
@@ -559,6 +681,11 @@ public sealed partial class CSharpSymbolCollector
                 _locals.Declare(declaration.Identifier, new Local(TypeOf(declaration.Type, context), true));
                 return;
 
+            case TypePattern typePattern when ConstantName(typePattern.Type, context) is { } constant:
+                // 'x is Kind.A or Kind.B': a name the parser could only take for a type, which is a constant
+                Bind(constant, context, inMember, input.IsUnknown ? null : input);
+                return;
+
             case TypePattern typePattern:
                 WalkNode(typePattern.Type, context, inMember);
                 return;
@@ -623,6 +750,57 @@ public sealed partial class CSharpSymbolCollector
                 WalkChildren(pattern, context, inMember);
                 return;
         }
+    }
+
+    /// <summary>
+    /// A dotted name in a type pattern that is not a type but a constant (an enum member, a const field, a local):
+    /// the expression it is, as a simple name or member access chain with the positions of its parts.
+    /// </summary>
+    private Expression? ConstantName(TypeReference? type, BindingContext context)
+    {
+        if (type is not NamedTypeReference { Qualifier: null, Alias: null, TypeArguments: null or [], IsNullable: false, Name.Parts: { Count: > 0 } parts } named
+            || parts.Count == 1 && (context.TypeParameters.ContainsKey(parts[0]) || parts[0] is "var" or "dynamic" or "nint" or "nuint")
+            || _binder.BindType(named, context) != null)
+        {
+            return null;
+        }
+
+        // A constant is a member of a type (Kind.A), or a local or member in scope (A); a name that is neither is
+        // a type from a reference not read
+        var isConstant = parts.Count == 1
+            ? _locals.Find(parts[0]) != null || HasValueMember(parts[0], context)
+            : _binder.BindNamespaceOrTypeName(new NameExpression(parts.Take(parts.Count - 1).ToList()), context) is { Type: not null };
+        if (!isConstant)
+        {
+            return null;
+        }
+
+        Expression? expression = null;
+        var position = named.Span.Start;
+        foreach (var part in parts)
+        {
+            var offset = FindName(part, position, named.Span.End);
+            position = offset + System.Text.Encoding.UTF8.GetByteCount(part);
+            expression = expression == null
+                ? new NameExpression([part]) { Span = new PaspanParsers.TextSpan(offset, position) }
+                : new MemberAccessExpression(part, expression) { Span = new PaspanParsers.TextSpan(named.Span.Start, position) };
+        }
+
+        return expression;
+    }
+
+    /// <summary>Whether a simple name is a member of the containing types or of a <c>using static</c> type.</summary>
+    private bool HasValueMember(string name, BindingContext context)
+    {
+        for (var type = context.Type; type != null; type = type.ContainingType)
+        {
+            if (_binder.LookupMembers(_binder.SelfType(type), name).Count > 0)
+            {
+                return true;
+            }
+        }
+
+        return _binder.StaticImports(context).Any(t => _binder.LookupMembers(_binder.SelfType(t), name).Count > 0);
     }
 
     private void DeclareDesignation(VariableDesignation? designation, SemType type)
@@ -771,7 +949,15 @@ public sealed partial class CSharpSymbolCollector
                 Bind(conditional.Condition, context, inMember);
                 var whenTrue = Bind(conditional.TrueExpression, context, inMember, expected);
                 var whenFalse = Bind(conditional.FalseExpression, context, inMember, expected);
-                return whenTrue.Type is NullType or UnknownType ? whenFalse : whenTrue;
+                if (whenTrue.Type is NullType or UnknownType)
+                {
+                    return whenFalse;
+                }
+
+                // The type the other branch converts to: c ? d : (double?)null is a double?
+                return whenFalse.Type is not (NullType or UnknownType) && _binder.Conversion(whenTrue.Type, whenFalse.Type) == 1 && _binder.Conversion(whenFalse.Type, whenTrue.Type) < 0
+                    ? whenFalse
+                    : whenTrue;
             }
 
             case InvocationExpression invocation:
@@ -907,7 +1093,26 @@ public sealed partial class CSharpSymbolCollector
             case AwaitExpression awaitExpression:
             {
                 var awaited = Bind(awaitExpression.Expression, context, inMember);
-                return SemTypes.Awaited(awaited.Type) is { } result ? new Bound(result, awaited.Exact) : Bound.Unknown;
+                return (SemTypes.Awaited(awaited.Type) ?? AwaiterResult(awaited.Type)) is { } result ? new Bound(result, awaited.Exact) : Bound.Unknown;
+            }
+
+            case AnonymousObjectCreationExpression anonymous:
+            {
+                // An anonymous type is modeled as a tuple with its property names: members are read the same way
+                var types = new List<SemType>();
+                var names = new List<string?>();
+                foreach (var member in anonymous.Members ?? [])
+                {
+                    types.Add(Bind(member.Expression, context, inMember).Type);
+                    names.Add(member.Name ?? member.Expression switch
+                    {
+                        NameExpression { Parts: [var name], Alias: null } => name,
+                        MemberAccessExpression access => access.MemberName,
+                        _ => null,
+                    });
+                }
+
+                return new Bound(new TupleType(types, names), true);
             }
 
             case ParenthesizedExpression parenthesized:
@@ -925,7 +1130,7 @@ public sealed partial class CSharpSymbolCollector
                     exact &= bound.Exact;
                 }
 
-                return new Bound(new TupleType(elements, tuple.Elements.Select(e => e.Name).ToList()), exact);
+                return new Bound(new TupleType(elements, TupleNames(tuple)), exact);
             }
 
             case RangeExpression range:
@@ -961,6 +1166,19 @@ public sealed partial class CSharpSymbolCollector
                 WalkChildren(expression, context, inMember);
                 return Bound.Unknown;
         }
+    }
+
+    /// <summary>What <c>await</c> gives for an awaitable type the model does not know: its <c>GetAwaiter().GetResult()</c>.</summary>
+    private SemType? AwaiterResult(SemType awaitable)
+    {
+        if (awaitable.IsUnknown || _binder.LookupMembers(awaitable, "GetAwaiter").FirstOrDefault(m => m.Symbol.Kind == SymbolKind.Method && _binder.Parameters(m.Symbol).Count == 0) is not { } getAwaiter)
+        {
+            return null;
+        }
+
+        var awaiter = getAwaiter.Substitute(_binder.MemberType(getAwaiter.Symbol));
+        var getResult = _binder.LookupMembers(awaiter, "GetResult").FirstOrDefault(m => m.Symbol.Kind == SymbolKind.Method);
+        return getResult == null ? null : getResult.Substitute(_binder.MemberType(getResult.Symbol)) is { IsUnknown: false } result ? result : null;
     }
 
     private static SemType LiteralType(LiteralExpression literal)
@@ -1038,7 +1256,10 @@ public sealed partial class CSharpSymbolCollector
         var arity = name.TypeArguments?.Count ?? 0;
         if (arity == 0 && _locals.Find(text) is { } local)
         {
-            return new Bound(local.Type, local.Exact);
+            // A local function not invoked is a method group
+            return local.FunctionParameters is { } functionParameters
+                ? new Bound(new MethodGroupType([new MethodSignature(functionParameters, functionParameters.Count, local.Type, null)], -1, true), true)
+                : new Bound(local.Type, local.Exact);
         }
 
         if (text == "_" && arity == 0)
@@ -1063,7 +1284,7 @@ public sealed partial class CSharpSymbolCollector
             var found = _binder.LookupMembers(receiver, text, arity);
             if (found.Count > 0)
             {
-                return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods);
+                return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods, group: ReferenceEquals(name, _methodGroupArgument));
             }
         }
 
@@ -1072,7 +1293,7 @@ public sealed partial class CSharpSymbolCollector
             var found = _binder.LookupMembers(_binder.SelfType(staticType), text, arity);
             if (found.Count > 0)
             {
-                return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods);
+                return BindFoundMembers(found, text, name.Span.Start, name.Span.End, inMember, true, invoked, out methods, group: ReferenceEquals(name, _methodGroupArgument));
             }
         }
 
@@ -1085,7 +1306,11 @@ public sealed partial class CSharpSymbolCollector
     }
 
     /// <summary>Records a property, field or event found by member lookup and returns its type; methods are left to the caller.</summary>
-    private Bound BindFoundMembers(List<FoundMember> found, string name, int start, int end, string? inMember, bool receiverExact, bool invoked, out List<FoundMember>? methods)
+    /// <remarks>
+    /// With <paramref name="group"/> (an argument), a method group is not recorded but returned as a
+    /// <see cref="MethodGroupType"/>: the parameter it converts to chooses the method.
+    /// </remarks>
+    private Bound BindFoundMembers(List<FoundMember> found, string name, int start, int end, string? inMember, bool receiverExact, bool invoked, out List<FoundMember>? methods, bool group = false)
     {
         methods = null;
 
@@ -1103,11 +1328,46 @@ public sealed partial class CSharpSymbolCollector
         if (!invoked)
         {
             // A method group converted to a delegate
+            var offset = FindName(name, start, end);
+            if (group)
+            {
+                return new Bound(new MethodGroupType(found.Select(Signature).ToList(), offset, receiverExact), receiverExact);
+            }
+
             var confidence = found.Count == 1 && receiverExact ? Confidence.Exact : Confidence.Inferred;
-            RecordReference(found[0].Symbol.Id, FindName(name, start, end), inMember, confidence);
+            RecordReference(TargetId(found[0].Symbol), offset, inMember, confidence);
         }
 
         return Bound.Unknown;
+    }
+
+    /// <summary>A method's parameter and return types, for its method group.</summary>
+    private MethodSignature Signature(FoundMember method)
+    {
+        var parameters = _binder.Parameters(method.Symbol);
+        return new MethodSignature(
+            parameters.Select(p => method.Substitute(p.Type)).ToList(),
+            parameters.Count(p => !p.HasDefault && !p.IsParams),
+            method.Substitute(_binder.MemberType(method.Symbol)),
+            method);
+    }
+
+    /// <summary>
+    /// Records the method of a method group that converts to <paramref name="target"/> (a delegate type): the one
+    /// method that fits, else the first.
+    /// </summary>
+    private void RecordMethodGroup(MethodGroupType group, SemType? target, string? inMember)
+    {
+        if (group.Offset < 0 || group.Methods.Count == 0)
+        {
+            return;
+        }
+
+        var signature = target != null ? _binder.DelegateSignature(target) : null;
+        var fitting = signature is { } known ? group.Methods.Where(m => _binder.MethodGroupConversion(m, known) >= 0).ToList() : [];
+        var chosen = fitting.Count == 1 ? fitting[0] : fitting.FirstOrDefault() ?? group.Methods[0];
+        var confidence = group.ReceiverExact && (group.Methods.Count == 1 || fitting.Count == 1) ? Confidence.Exact : Confidence.Inferred;
+        RecordReference(TargetId(chosen.Member!.Symbol), group.Offset, inMember, confidence);
     }
 
     /// <summary>Whether a property, field or event can be invoked: its type is a delegate, or not known.</summary>
@@ -1157,7 +1417,7 @@ public sealed partial class CSharpSymbolCollector
                         if (found.Count > 0)
                         {
                             callee = (target, null, true);
-                            var bound = BindFoundMembers(found, name, nameStart, nameEnd, inMember, true, invoked, out var methods);
+                            var bound = BindFoundMembers(found, name, nameStart, nameEnd, inMember, true, invoked, out var methods, group: ReferenceEquals(access, _methodGroupArgument));
                             callee = (target, methods, true);
                             return bound;
                         }
@@ -1202,11 +1462,12 @@ public sealed partial class CSharpSymbolCollector
 
             default:
             {
-                var receiver = target.Type;
+                // x?.Member of a nullable value type is a member of the value, not of Nullable<T>
+                var receiver = access.IsConditional ? target.Type.Underlying : target.Type;
                 var found = _binder.LookupMembers(receiver, name, arity);
                 if (found.Count > 0)
                 {
-                    var bound = BindFoundMembers(found, name, nameStart, nameEnd, inMember, target.Exact, invoked, out var methods);
+                    var bound = BindFoundMembers(found, name, nameStart, nameEnd, inMember, target.Exact, invoked, out var methods, group: ReferenceEquals(access, _methodGroupArgument));
                     callee = (target, methods, false);
                     return bound;
                 }
@@ -1286,6 +1547,12 @@ public sealed partial class CSharpSymbolCollector
         }
 
         CompleteArguments(null, arguments, context, inMember);
+        if (arguments is [{ Bound.Type: ExternalType { Name: "Range", Arguments.Count: 0 } }] && target.Type.Underlying is ArrayType or ExternalType { Name: "String" })
+        {
+            // A range of an array is an array (RuntimeHelpers.GetSubArray), of a string a string
+            return new Bound(target.Type.Underlying, target.Exact);
+        }
+
         return SemTypes.IndexedBy(target.Type) is { } item ? new Bound(item, target.Exact) : Bound.Unknown;
     }
 
@@ -1529,6 +1796,29 @@ public sealed partial class CSharpSymbolCollector
                 case DeclarationExpression declaration when IsVar(declaration.Type):
                     result.Add(new ArgumentInfo(argument, Bound.Unknown, true));
                     break;
+                case TupleExpression tuple when tuple.Elements.Any(e => e.Expression is LambdaExpression or AnonymousMethodExpression):
+                {
+                    // A tuple of lambdas: its elements get their delegate types from the parameter's tuple type
+                    var elements = tuple.Elements.Select(e => e.Expression switch
+                    {
+                        LambdaExpression lambda => new LambdaType(lambda.Parameters?.Count ?? 0),
+                        AnonymousMethodExpression anonymous => new LambdaType(anonymous.Parameters?.Count ?? -1),
+                        var other => Bind(other, context, inMember).Type,
+                    }).ToList();
+                    result.Add(new ArgumentInfo(argument, new Bound(new TupleType(elements, TupleNames(tuple)), true), true));
+                    break;
+                }
+
+                case NameExpression { Parts.Count: 1, Alias: null } or MemberAccessExpression { IsPointerAccess: false }:
+                {
+                    // A method group is recorded once the parameter it converts to is known
+                    _methodGroupArgument = argument.Expression;
+                    var bound = Bind(argument.Expression, context, inMember);
+                    _methodGroupArgument = null;
+                    result.Add(new ArgumentInfo(argument, bound, bound.Type is MethodGroupType { Offset: >= 0 }));
+                    break;
+                }
+
                 default:
                     result.Add(new ArgumentInfo(argument, Bind(argument.Expression, context, inMember), false));
                     break;
@@ -1536,6 +1826,32 @@ public sealed partial class CSharpSymbolCollector
         }
 
         return result;
+    }
+
+    /// <summary>The names of a tuple literal's elements: written, or inferred from a name or member access (C# 7.1).</summary>
+    private static List<string?> TupleNames(TupleExpression tuple)
+    {
+        var names = tuple.Elements.Select(e => e.Name ?? e.Expression switch
+        {
+            NameExpression { Parts: [var name], TypeArguments: null or [], Alias: null } => name,
+            MemberAccessExpression { TypeArguments: null or [] } access => access.MemberName,
+            _ => null,
+        }).ToList();
+
+        // An inferred name is dropped when it is reserved or appears twice
+        var all = names.ToList();
+        for (var i = 0; i < names.Count; i++)
+        {
+            if (tuple.Elements[i].Name == null && all[i] is { } name
+                && (name is "ToString" or "GetHashCode" or "Equals" or "GetType" or "CompareTo" or "Rest"
+                    || name.StartsWith("Item", StringComparison.Ordinal) && name.Length > 4 && name[4..].All(char.IsAsciiDigit)
+                    || all.Count(n => n == name) > 1))
+            {
+                names[i] = null;
+            }
+        }
+
+        return names;
     }
 
     /// <summary>Binds the lambdas and <c>out var</c> declarations of the arguments with the chosen member's parameter types.</summary>
@@ -1550,6 +1866,19 @@ public sealed partial class CSharpSymbolCollector
             }
 
             var parameterType = chosen?.ParameterType(i) ?? (delegateTypes != null && i < delegateTypes.Count ? delegateTypes[i] : null);
+            if (argument.Bound.Type is MethodGroupType group)
+            {
+                RecordMethodGroup(group, parameterType, inMember);
+                if (chosen != null && parameterType != null && _binder.DelegateSignature(parameterType) is { } target
+                    && MethodGroupResult(group, target.Parameters) is { } result)
+                {
+                    // A method group's return type infers the method's type parameters in its delegate's return type
+                    chosen.Infer(target.Return, result);
+                }
+
+                continue;
+            }
+
             switch (argument.Argument.Expression)
             {
                 case LambdaExpression or AnonymousMethodExpression:
@@ -1630,17 +1959,19 @@ public sealed partial class CSharpSymbolCollector
 
             case BlockLambdaBody block:
                 WalkStatement(block.Block, context, inMember);
-                returned = _lambdaReturns.FirstOrDefault(r => r is not (NullType or UnknownType));
+                returned = BlockResult(_lambdaReturns);
                 break;
             case BlockStatement anonymousBody:
                 WalkStatement(anonymousBody, context, inMember);
-                returned = _lambdaReturns.FirstOrDefault(r => r is not (NullType or UnknownType));
+                returned = BlockResult(_lambdaReturns);
                 break;
         }
 
         if (lambda is LambdaExpression { IsAsync: true } && returned != null)
         {
-            returned = new ExternalType("Task", "System.Threading.Tasks.Task", [returned]);
+            returned = returned == SemType.Void
+                ? new ExternalType("Task", "System.Threading.Tasks.Task", [])
+                : new ExternalType("Task", "System.Threading.Tasks.Task", [returned]);
         }
 
         _locals = savedLocals;
@@ -1650,6 +1981,56 @@ public sealed partial class CSharpSymbolCollector
         _bound[lambda] = bound;
         return bound;
     }
+
+    /// <summary>What a block body returns: the first known type of its <c>return</c> expressions, <see cref="SemType.Void"/> without any.</summary>
+    private static SemType? BlockResult(List<SemType> returns) =>
+        returns.Count == 0 ? SemType.Void : returns.FirstOrDefault(r => r is not (NullType or UnknownType)) ?? SemType.Unknown;
+
+    /// <summary>
+    /// How a lambda converts to a delegate whose return type is <paramref name="delegateReturn"/>, given what the
+    /// lambda returns: 2 for the same type, 1 for a conversion (or not known), -1 for none. A lambda converts to a
+    /// delegate returning void when it returns nothing, or when its body is an expression that can be a statement.
+    /// </summary>
+    private int LambdaConversion(Expression lambda, SemType? returned, SemType delegateReturn)
+    {
+        if (returned == null)
+        {
+            return 1;
+        }
+
+        if (delegateReturn == SemType.Void)
+        {
+            if (returned == SemType.Void || lambda is LambdaExpression { IsAsync: true } && returned is ExternalType { Name: "Task", Arguments.Count: 0 })
+            {
+                return 1;
+            }
+
+            // A block that returns a value never converts to void; an expression only when it could be a statement
+            return lambda is LambdaExpression { Body: ExpressionLambdaBody { Expression: var body } } ? returned.IsUnknown || IsStatementExpression(body) ? 1 : -1 : -1;
+        }
+
+        if (returned == SemType.Void)
+        {
+            // A lambda that returns nothing converts to a delegate returning void only
+            return -1;
+        }
+
+        if (returned.IsUnknown || delegateReturn.IsUnknown)
+        {
+            return 1;
+        }
+
+        var conversion = _binder.Conversion(returned, delegateReturn);
+        return conversion == 2 ? 2 : conversion < 0 ? -1 : 1;
+    }
+
+    private static bool IsStatementExpression(Expression expression) => expression switch
+    {
+        InvocationExpression or AwaitExpression or ObjectCreationExpression => true,
+        BinaryExpression binary => binary.Operator is >= BinaryOperator.Assign and <= BinaryOperator.UnsignedRightShiftAssign or BinaryOperator.NullCoalescingAssign,
+        UnaryExpression unary => unary.Operator is UnaryOperator.Increment or UnaryOperator.Decrement,
+        _ => false,
+    };
 
     private Bound BindInvocation(InvocationExpression invocation, BindingContext context, string? inMember)
     {
@@ -1783,6 +2164,13 @@ public sealed partial class CSharpSymbolCollector
             return Bound.Unknown;
         }
 
+        if (methods is { Count: > 0 })
+        {
+            // Member lookup found methods, but none applies with the argument types as far as they are known
+            CompleteArguments(null, args, context, inMember);
+            return RecordInapplicable(methods, args.Count, offset, inMember);
+        }
+
         // A method of a type from a reference: the base class library model knows a few
         if (SemTypes.KnownMethod(receiver.Type, name) is { } modeled && !isStatic)
         {
@@ -1794,6 +2182,10 @@ public sealed partial class CSharpSymbolCollector
                 {
                     BindLambda(argument.Argument.Expression, context, inMember, lambdaSignature, out var returned);
                     lambdaResult ??= returned;
+                }
+                else if (argument.Bound.Type is MethodGroupType group)
+                {
+                    RecordMethodGroup(group, null, inMember);
                 }
                 else if (argument.Deferred)
                 {
@@ -1860,12 +2252,16 @@ public sealed partial class CSharpSymbolCollector
         public SemType Substitute(SemType type) => SemTypes.Substitute(type, p =>
             p.IsMethod && p.Owner == Member.Symbol ? methodArguments.GetValueOrDefault(p.Ordinal) : Member.Map(p));
 
+        /// <summary>Substitutes the type arguments known so far; the method's type parameters not inferred yet are unknown.</summary>
+        public SemType SubstituteKnown(SemType type) => SemTypes.Substitute(type, p =>
+            p.IsMethod && p.Owner == Member.Symbol ? methodArguments.GetValueOrDefault(p.Ordinal) ?? SemType.Unknown : Member.Map(p));
+
         /// <summary>Infers the method's type parameters in <paramref name="parameterType"/> from an argument's type.</summary>
         public void Infer(SemType parameterType, SemType argumentType) => Unify(parameterType, argumentType, Member.Symbol, methodArguments, binder, 0);
 
         public static void Unify(SemType parameter, SemType argument, CodeSymbol method, Dictionary<int, SemType> inferred, CSharpBinder binder, int depth)
         {
-            if (depth > 8 || argument is UnknownType or NullType or LambdaType)
+            if (depth > 8 || argument is UnknownType or NullType or LambdaType or MethodGroupType)
             {
                 return;
             }
@@ -1973,6 +2369,20 @@ public sealed partial class CSharpSymbolCollector
     /// which goes into the first parameter.
     /// </summary>
     private Resolution? Resolve(List<FoundMember> candidates, List<ArgumentInfo> arguments, IReadOnlyList<SemType> typeArguments, SemType? extensionReceiver, BindingContext context)
+    {
+        var resolution = Resolve(candidates, arguments, typeArguments, extensionReceiver, context, lambdaResults: false);
+
+        // Candidates the lambdas' parameter counts could not tell apart: what the lambdas return decides, which
+        // takes binding them with each candidate's parameter types
+        if (resolution is { Tied.Count: > 1 } && arguments.Any(a => a.Bound.Type is LambdaType))
+        {
+            return Resolve(candidates, arguments, typeArguments, extensionReceiver, context, lambdaResults: true) ?? resolution;
+        }
+
+        return resolution;
+    }
+
+    private Resolution? Resolve(List<FoundMember> candidates, List<ArgumentInfo> arguments, IReadOnlyList<SemType> typeArguments, SemType? extensionReceiver, BindingContext context, bool lambdaResults)
     {
         var applicable = new List<(Resolution Resolution, int Score, int Unknown, bool Generic, bool Expanded, int Defaults)>();
         foreach (var candidate in candidates)
@@ -2098,6 +2508,25 @@ public sealed partial class CSharpSymbolCollector
                         : parameter.Type;
                     resolution.Infer(type, arguments[i].Bound.Type);
                 }
+
+                // Then from what method groups and lambdas give, once the types of their parameters are known
+                for (var i = 0; i < arguments.Count; i++)
+                {
+                    var argumentType = arguments[i].Bound.Type;
+                    if (argumentType is not (MethodGroupType or LambdaType) || argumentType is LambdaType && !lambdaResults
+                        || _binder.DelegateSignature(parameters[parameterOf[i]].Type) is not { } declared
+                        || argumentType is LambdaType { ParameterCount: var count } && count != declared.Parameters.Count)
+                    {
+                        continue;
+                    }
+
+                    var parameterTypes = declared.Parameters.Select(resolution.SubstituteKnown).ToList();
+                    var returned = argumentType is MethodGroupType group ? MethodGroupResult(group, parameterTypes) : LambdaResult(arguments[i].Argument.Expression, parameterTypes, context, null);
+                    if (returned != null && returned != SemType.Void)
+                    {
+                        resolution.Infer(declared.Return, returned);
+                    }
+                }
             }
 
             // A params parameter without arguments is the expanded form too
@@ -2108,6 +2537,11 @@ public sealed partial class CSharpSymbolCollector
                 var parameterType = resolution.Substitute(parameter.Type);
                 var argumentType = arguments[i].Bound.Type;
                 var conversion = _binder.Conversion(argumentType, parameterType);
+                if (conversion < 0 && (ConstantFits(arguments[i].Argument.Expression, parameterType) || UnsignedFromConstant(arguments[i], parameterType, context) || ZeroToEnum(arguments[i].Argument.Expression, parameterType)))
+                {
+                    conversion = 1;
+                }
+
                 if (parameter.IsParams && conversion < 2)
                 {
                     // Expanded form: each argument converts to the element type
@@ -2121,10 +2555,19 @@ public sealed partial class CSharpSymbolCollector
                     }
                 }
 
-                if (argumentType is LambdaType lambdaType && _binder.DelegateSignature(expanded[i] ? SemTypes.ElementOf(parameterType) ?? parameterType : parameterType) is { } signature
-                    && lambdaType.ParameterCount >= 0 && signature.Parameters.Count != lambdaType.ParameterCount)
+                if (argumentType is LambdaType lambdaType && _binder.DelegateSignature(expanded[i] ? SemTypes.ElementOf(parameterType) ?? parameterType : parameterType) is { } signature)
                 {
-                    conversion = -1;
+                    if (lambdaType.ParameterCount >= 0 && signature.Parameters.Count != lambdaType.ParameterCount)
+                    {
+                        conversion = -1;
+                    }
+                    else if (lambdaResults && lambdaType.ParameterCount >= 0 && conversion >= 0)
+                    {
+                        // A lambda whose result converts to the delegate's return type better is a better conversion
+                        var lambda = arguments[i].Argument.Expression;
+                        var returned = LambdaResult(lambda, signature.Parameters.Select(resolution.SubstituteKnown).ToList(), context, null);
+                        conversion = LambdaConversion(lambda, returned, resolution.SubstituteKnown(signature.Return));
+                    }
                 }
 
                 // A collection expression converts to collection types only
@@ -2175,7 +2618,7 @@ public sealed partial class CSharpSymbolCollector
 
         // A better conversion target decides before genericity: IEnumerable<T> is better than IEnumerable
         var top = best.Where(b => b.Score == first.Score).ToList();
-        if (top.Count > 1 && top.FirstOrDefault(t => top.All(o => o.Resolution == t.Resolution || MoreSpecific(t.Resolution, o.Resolution, arguments.Count))) is { Resolution: not null } better)
+        if (top.Count > 1 && top.FirstOrDefault(t => top.All(o => o.Resolution == t.Resolution || MoreSpecific(t.Resolution, o.Resolution, arguments, lambdaResults))) is { Resolution: not null } better)
         {
             first = better;
         }
@@ -2200,10 +2643,27 @@ public sealed partial class CSharpSymbolCollector
             }
         }
 
+        // C# 14 first-class spans: an array (an argument, or the receiver of an extension method) converts to a
+        // span better than to an interface of the array, and to ReadOnlySpan<T> better than to Span<T>
+        if (tied.Count > 1 && _binder.LanguageVersion(_source.Project) >= CSharpLanguageVersion.CSharp14)
+        {
+            static int Rank(SemType? parameter) => parameter?.Underlying is ExternalType { Name: var name } ? name == "ReadOnlySpan" ? 2 : name == "Span" ? 1 : 0 : 0;
+            int SpanRank(Resolution resolution) =>
+                (extensionReceiver?.Underlying is ArrayType ? Rank(resolution.ReceiverParameterType) : 0)
+                + Enumerable.Range(0, arguments.Count).Where(i => arguments[i].Bound.Type.Underlying is ArrayType).Sum(i => Rank(resolution.DeclaredParameterType(i)));
+            var bestRank = tied.Max(t => SpanRank(t.Resolution));
+            var withSpans = tied.Where(t => SpanRank(t.Resolution) == bestRank).ToList();
+            if (bestRank > 0 && withSpans.Count < tied.Count)
+            {
+                tied = withSpans;
+                first = tied[0];
+            }
+        }
+
         if (tied.Count > 1)
         {
             var specific = tied.FirstOrDefault(t => tied.All(o => o.Resolution == t.Resolution
-                || MoreSpecific(t.Resolution, o.Resolution, arguments.Count)
+                || MoreSpecific(t.Resolution, o.Resolution, arguments, lambdaResults)
                 || MoreSpecificDeclaration(t.Resolution, o.Resolution, arguments.Count)));
             if (specific.Resolution != null)
             {
@@ -2219,17 +2679,172 @@ public sealed partial class CSharpSymbolCollector
 
     private static bool ArrayLike(SemType type) => type.Underlying is ArrayType or NullType;
 
-    /// <summary>Whether every parameter of <paramref name="a"/> converts to the corresponding one of <paramref name="b"/> (a derived type is better than its base).</summary>
-    private bool MoreSpecific(Resolution a, Resolution b, int argumentCount)
+    /// <summary>
+    /// Whether an integer constant converts to <paramref name="type"/> because its value is in range: an <c>int</c>
+    /// constant to <c>sbyte</c>, <c>byte</c>, <c>short</c>, <c>ushort</c>, <c>uint</c> or <c>ulong</c>, a <c>long</c> one to <c>ulong</c> (§10.2.11).
+    /// </summary>
+    private static bool ConstantFits(Expression expression, SemType type)
+    {
+        if (IntegerConstant(expression) is not { } constant || type.Underlying is not ExternalType { Arguments.Count: 0, Name: var name })
+        {
+            return false;
+        }
+
+        var (value, isInt) = constant;
+        return name switch
+        {
+            "SByte" => isInt && value is >= sbyte.MinValue and <= sbyte.MaxValue,
+            "Byte" => isInt && value is >= byte.MinValue and <= byte.MaxValue,
+            "Int16" => isInt && value is >= short.MinValue and <= short.MaxValue,
+            "UInt16" => isInt && value is >= ushort.MinValue and <= ushort.MaxValue,
+            "UInt32" or "UIntPtr" => isInt && value >= 0,
+            "UInt64" => value >= 0,
+            _ => false,
+        };
+    }
+
+    /// <summary>The constant 0 converts to every enum type (§10.2.4).</summary>
+    private bool ZeroToEnum(Expression expression, SemType type) =>
+        IntegerConstant(expression) is (0, _)
+        && type.Underlying switch
+        {
+            NamedType named => named.Symbol.Kind == SymbolKind.Enum,
+            ExternalType external => _binder.DefinitionOf(external)?.Kind == PaspanCodeGraph.Metadata.MetadataTypeKind.Enum,
+            _ => false,
+        };
+
+    /// <summary>
+    /// An <c>int</c> constant field whose value is not read, to <c>uint</c> or <c>ulong</c>: taken to be in range,
+    /// as constants passed where an unsigned value goes are (Math.Min(size, MaxBytes)).
+    /// </summary>
+    private bool UnsignedFromConstant(ArgumentInfo argument, SemType type, BindingContext context)
+    {
+        if (type.Underlying is not ExternalType { Name: "UInt32" or "UInt64", Arguments.Count: 0 } || !Equals(argument.Bound.Type, SemTypes.Int32))
+        {
+            return false;
+        }
+
+        static bool IsConstant(FoundMember? member) => member?.Symbol is { Kind: SymbolKind.Field } field && field.Modifiers.Contains("const");
+        switch (argument.Argument.Expression)
+        {
+            case NameExpression { Parts: [var name], TypeArguments: null or [], Alias: null } when _locals.Find(name) == null:
+                for (var containing = context.Type; containing != null; containing = containing.ContainingType)
+                {
+                    if (_binder.LookupMembers(_binder.SelfType(containing), name).FirstOrDefault() is { } found)
+                    {
+                        return IsConstant(found);
+                    }
+                }
+
+                return false;
+            case MemberAccessExpression { Target: { } target } access when _bound.TryGetValue(target, out var bound) && bound.Type is TypeExpressionType { Type: var owner }:
+                return IsConstant(_binder.LookupMembers(owner, access.MemberName).FirstOrDefault());
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>The value of an integer literal of type <c>int</c> or <c>long</c> (with its sign), and whether it is an <c>int</c>.</summary>
+    private static (long Value, bool IsInt)? IntegerConstant(Expression expression)
+    {
+        switch (expression)
+        {
+            case ParenthesizedExpression parenthesized:
+                return IntegerConstant(parenthesized.Expression);
+            case UnaryExpression { Operator: UnaryOperator.Minus, Operand: var operand } when IntegerConstant(operand) is { } positive:
+                return (-positive.Value, positive.IsInt || positive.Value == -(long)int.MinValue);
+            case MemberAccessExpression { Target: PredefinedTypeExpression { Type: PredefinedType.Int or PredefinedType.Long } predefined, MemberName: "MaxValue" or "MinValue" } limit:
+                return predefined.Type == PredefinedType.Int
+                    ? (limit.MemberName == "MaxValue" ? int.MaxValue : int.MinValue, true)
+                    : (limit.MemberName == "MaxValue" ? long.MaxValue : long.MinValue, false);
+            case LiteralExpression { Kind: LiteralKind.Integer, Text: { } text }:
+            {
+                text = text.Replace("_", "", StringComparison.Ordinal);
+                var isLong = text.EndsWith('l') || text.EndsWith('L');
+                if (isLong)
+                {
+                    text = text[..^1];
+                }
+
+                if (text.Length == 0 || text[^1] is 'u' or 'U')
+                {
+                    return null;
+                }
+
+                ulong value;
+                var parsed = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? ulong.TryParse(text[2..], System.Globalization.NumberStyles.AllowHexSpecifier, null, out value)
+                    : text.StartsWith("0b", StringComparison.OrdinalIgnoreCase) ? TryParseBinary(text[2..], out value)
+                    : ulong.TryParse(text, out value);
+                if (!parsed || value > long.MaxValue)
+                {
+                    return null;
+                }
+
+                return ((long)value, !isLong && value <= int.MaxValue);
+            }
+
+            default:
+                return null;
+        }
+
+        static bool TryParseBinary(string digits, out ulong value)
+        {
+            value = 0;
+            foreach (var digit in digits)
+            {
+                if (digit is not ('0' or '1') || value > ulong.MaxValue >> 1)
+                {
+                    return false;
+                }
+
+                value = (value << 1) | (digit == '1' ? 1UL : 0UL);
+            }
+
+            return digits.Length > 0;
+        }
+    }
+
+    /// <summary>What a method group gives when converted to a delegate with these parameter types: the return type its fitting methods share.</summary>
+    private SemType? MethodGroupResult(MethodGroupType group, IReadOnlyList<SemType> parameters)
+    {
+        var fitting = group.Methods.Where(m => _binder.MethodGroupConversion(m, (parameters, SemType.Void)) >= 0).ToList();
+        return fitting.Count > 0 && fitting.All(m => Equals(m.Return, fitting[0].Return)) && !SemTypes.HasTypeParameters(fitting[0].Return)
+            ? fitting[0].Return
+            : null;
+    }
+
+    /// <summary>
+    /// Whether every parameter of <paramref name="a"/> converts to the corresponding one of <paramref name="b"/> (a
+    /// derived type is better than its base). For a lambda, the delegates' return types compare: Func&lt;T, int&gt;
+    /// is better than Func&lt;T, long&gt;, and a delegate that returns a value better than one returning void.
+    /// </summary>
+    private bool MoreSpecific(Resolution a, Resolution b, List<ArgumentInfo> arguments, bool lambdaResults)
     {
         var strictly = false;
-        for (var i = 0; i < argumentCount; i++)
+        for (var i = 0; i < arguments.Count; i++)
         {
             var pa = a.ParameterType(i);
             var pb = b.ParameterType(i);
             if (pa == null || pb == null)
             {
                 return false;
+            }
+
+            if (lambdaResults && arguments[i].Bound.Type is LambdaType && _binder.DelegateSignature(pa) is { } da && _binder.DelegateSignature(pb) is { } db
+                && SemTypes.SameList(da.Parameters, db.Parameters) && !Equals(da.Return, db.Return))
+            {
+                if (da.Return == SemType.Void || db.Return == SemType.Void)
+                {
+                    if (da.Return == SemType.Void)
+                    {
+                        return false;
+                    }
+
+                    strictly = true;
+                    continue;
+                }
+
+                (pa, pb) = (da.Return, db.Return);
             }
 
             var ab = _binder.Conversion(pa, pb);
@@ -2461,6 +3076,28 @@ public sealed partial class CSharpSymbolCollector
         {
             RecordReference(ReferenceTargets.Unresolved + name, offset, inMember, Confidence.NameOnly);
         }
+    }
+
+    /// <summary>
+    /// The methods member lookup found for a call none of which overload resolution found applicable: the one that
+    /// takes as many arguments is inferred, several are name-only candidates. Returns the type they all return.
+    /// </summary>
+    private Bound RecordInapplicable(List<FoundMember> methods, int argumentCount, int offset, string? inMember)
+    {
+        var candidates = methods.Where(m => Accepts(m.Symbol, argumentCount)).ToList();
+        if (candidates.Count == 0)
+        {
+            candidates = methods;
+        }
+
+        var confidence = candidates.Count == 1 ? Confidence.Inferred : Confidence.NameOnly;
+        foreach (var candidate in candidates.Take(MaxNameOnlyCandidates))
+        {
+            RecordReference(TargetId(candidate.Symbol), offset, inMember, confidence);
+        }
+
+        var returns = candidates.Select(c => c.Substitute(_binder.MemberType(c.Symbol))).Distinct().ToList();
+        return returns is [var only] && !SemTypes.HasTypeParameters(only) ? new Bound(only, false) : Bound.Unknown;
     }
 
     private bool Accepts(CodeSymbol method, int argumentCount)
