@@ -74,7 +74,6 @@ public sealed partial class CSharpSymbolCollector
                 break;
             }
 
-            case GlobalStatement:
             case IncompleteMemberDeclaration:
                 EnterMember(scope, null, null, scope.TypeParameters, SemType.Unknown);
                 WalkNode(member, scope.Context, null);
@@ -134,6 +133,25 @@ public sealed partial class CSharpSymbolCollector
                 WalkNode(member, scope.Context, id);
                 break;
             }
+        }
+    }
+
+    /// <summary>The method the compiler makes of a file's top-level statements, by its documentation id.</summary>
+    internal const string TopLevelMethodId = "M:Program.<Main>$(System.String[])";
+
+    /// <summary>
+    /// The top-level statements of a file, walked as the one method the compiler makes of them: a local of one
+    /// statement is in scope in the next ones, the local functions in all of them, and <c>args</c> is a parameter.
+    /// </summary>
+    private void WalkTopLevelStatements(IReadOnlyList<GlobalStatement> statements, Scope scope)
+    {
+        EnterMember(scope, null, null, scope.TypeParameters, SemType.Unknown);
+        _locals.Declare("args", new Local(new ArrayType(SemTypes.String, 1), true));
+        var body = statements.Select(s => s.Statement).ToList();
+        DeclareLocalFunctions(body, scope.Context);
+        foreach (var statement in body)
+        {
+            WalkStatement(statement, scope.Context, TopLevelMethodId);
         }
     }
 

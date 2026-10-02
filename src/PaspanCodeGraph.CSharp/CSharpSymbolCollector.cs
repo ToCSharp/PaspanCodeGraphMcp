@@ -117,8 +117,19 @@ public sealed partial class CSharpSymbolCollector
             return;
         }
 
+        // Top-level statements are one method body, walked together
+        if (_pass == CollectPass.References && members.OfType<GlobalStatement>().ToList() is { Count: > 0 } statements)
+        {
+            WalkTopLevelStatements(statements, scope);
+        }
+
         foreach (var member in members)
         {
+            if (_pass == CollectPass.References && member is GlobalStatement)
+            {
+                continue;
+            }
+
             VisitMember(member, scope);
         }
     }

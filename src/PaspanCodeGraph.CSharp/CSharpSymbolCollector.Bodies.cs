@@ -1088,14 +1088,18 @@ public sealed partial class CSharpSymbolCollector
     private Bound BindFoundMembers(List<FoundMember> found, string name, int start, int end, string? inMember, bool receiverExact, bool invoked, out List<FoundMember>? methods)
     {
         methods = null;
-        var value = found.FirstOrDefault(f => f.Symbol.Kind is not SymbolKind.Method);
+
+        // Invoked, only the invocable members count: methods, and properties, fields and events of a delegate type (or
+        // of a type not known). A property that is not a delegate, List<T>.Count in list.Count(x => ...), leaves the
+        // methods, and with none of them the extension methods.
+        var value = found.FirstOrDefault(f => f.Symbol.Kind is not SymbolKind.Method && (!invoked || Invocable(f)));
         if (value != null)
         {
             RecordReference(TargetId(value.Symbol), FindName(name, start, end), inMember, receiverExact ? Confidence.Exact : Confidence.Inferred);
             return new Bound(value.Substitute(_binder.MemberType(value.Symbol)), receiverExact);
         }
 
-        methods = found;
+        methods = invoked ? found.Where(f => f.Symbol.Kind == SymbolKind.Method).ToList() : found;
         if (!invoked)
         {
             // A method group converted to a delegate
@@ -1104,6 +1108,13 @@ public sealed partial class CSharpSymbolCollector
         }
 
         return Bound.Unknown;
+    }
+
+    /// <summary>Whether a property, field or event can be invoked: its type is a delegate, or not known.</summary>
+    private bool Invocable(FoundMember member)
+    {
+        var type = member.Substitute(_binder.MemberType(member.Symbol));
+        return type.IsUnknown || _binder.DelegateSignature(type) != null;
     }
 
     private Bound BindMemberAccess(MemberAccessExpression access, BindingContext context, string? inMember, bool invoked, out (Bound Receiver, List<FoundMember>? Methods, bool IsStatic) callee)
@@ -1677,7 +1688,7 @@ public sealed partial class CSharpSymbolCollector
                 }
 
                 var value = BindSimpleName(simple, context, inMember, out methods, invoked: true);
-                if (methods == null)
+                if (methods is not { Count: > 0 })
                 {
                     // A property or field of a delegate type, or nothing known
                     var arguments = BindArguments(invocation.Arguments, context, inMember);
