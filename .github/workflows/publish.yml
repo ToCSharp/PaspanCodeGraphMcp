@@ -34,16 +34,7 @@ jobs:
       run: dotnet build --configuration Release --no-restore -p:Version=${{ env.VERSION }}
 
     - name: Pack NuGet Package
-      run: dotnet pack --configuration Release --no-build -p:Version=${{ env.VERSION }} --output ./artifacts
-
-    - name: Debug OIDC claims
-      uses: actions/github-script@v8
-      with:
-        script: |
-          const t = await core.getIDToken('https://www.nuget.org');
-          const p = JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString());
-          console.log({ repository: p.repository, repository_owner: p.repository_owner,
-                        job_workflow_ref: p.job_workflow_ref, environment: p.environment });
+      run: dotnet pack src/PaspanCodeGraphMcp/PaspanCodeGraphMcp.csproj --configuration Release --no-build -p:Version=${{ env.VERSION }} --output ./artifacts
 
     - name: NuGet Login
       id: nuget_login
@@ -51,10 +42,6 @@ jobs:
       with:
         user: tocsharp
 
+    # On Windows NuGet only expands the wildcard with a backslash separator
     - name: Push to NuGet.org
-      shell: bash
-      run: |
-        dotnet nuget push "./artifacts/*.nupkg" \
-          --source "https://api.nuget.org/v3/index.json" \
-          --api-key "${{ steps.nuget_login.outputs.NUGET_API_KEY }}" \
-          --skip-duplicate
+      run: dotnet nuget push artifacts\*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }} --skip-duplicate
