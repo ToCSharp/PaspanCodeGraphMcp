@@ -11,6 +11,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      packages: write
 
     steps:
     - name: Checkout Source Code
@@ -45,3 +46,6 @@ jobs:
     # On Windows NuGet only expands the wildcard with a backslash separator
     - name: Push to NuGet.org
       run: dotnet nuget push artifacts\*.nupkg --source https://api.nuget.org/v3/index.json --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }} --skip-duplicate
+
+    - name: Push to GitHub Packages
+      run: dotnet nuget push artifacts\*.nupkg --source https://nuget.pkg.github.com/ToCSharp/index.json --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate
