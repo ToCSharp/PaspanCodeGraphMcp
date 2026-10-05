@@ -17,7 +17,7 @@ jobs:
       uses: actions/checkout@v6
       with:
         submodules: recursive
-        
+
     - name: Setup .NET SDK
       uses: actions/setup-dotnet@v5
       with:
@@ -35,6 +35,15 @@ jobs:
 
     - name: Pack NuGet Package
       run: dotnet pack --configuration Release --no-build -p:Version=${{ env.VERSION }} --output ./artifacts
+
+    - name: Debug OIDC claims
+      uses: actions/github-script@v8
+      with:
+        script: |
+          const t = await core.getIDToken('https://www.nuget.org');
+          const p = JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString());
+          console.log({ repository: p.repository, repository_owner: p.repository_owner,
+                        job_workflow_ref: p.job_workflow_ref, environment: p.environment });
 
     - name: NuGet Login
       id: nuget_login
