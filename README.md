@@ -21,8 +21,19 @@ lookup and the types of expressions; the same tools answer for both languages, i
 
 ## Installing
 
-The server is the .NET tool `paspan-code-graph-mcp` (package `PaspanCodeGraphMcp`, .NET 10). Until the package is
-on NuGet.org, build it from a clone:
+The server is the .NET tool `paspan-code-graph-mcp` (package
+[`PaspanCodeGraphMcp`](https://www.nuget.org/packages/PaspanCodeGraphMcp), .NET 10), published on NuGet.org:
+
+```
+dotnet tool install --global PaspanCodeGraphMcp
+paspan-code-graph-mcp --help
+```
+
+`dnx PaspanCodeGraphMcp --yes -- <arguments>` runs it without installing (the package is marked as an MCP server,
+with `.mcp/server.json` describing it). Without installing anything,
+`dotnet run --project src/PaspanCodeGraphMcp -- <arguments>` runs it from a clone.
+
+To build it from a clone instead:
 
 ```
 git clone --recurse-submodules https://github.com/ToCSharp/PaspanCodeGraphMcp.git
@@ -31,11 +42,6 @@ dotnet pack src/PaspanCodeGraphMcp -c Release -o artifacts
 dotnet tool install --global PaspanCodeGraphMcp --add-source artifacts
 paspan-code-graph-mcp --help
 ```
-
-Once it is on NuGet.org, `dotnet tool install --global PaspanCodeGraphMcp` installs it, and `dnx PaspanCodeGraphMcp
---yes -- <arguments>` runs it without installing (the package is marked as an MCP server, with
-`.mcp/server.json` describing it). Without installing anything,
-`dotnet run --project src/PaspanCodeGraphMcp -- <arguments>` runs it from the clone.
 
 A single native binary, which starts without the .NET runtime and loads a little faster:
 
