@@ -15,7 +15,9 @@ jobs:
     steps:
     - name: Checkout Source Code
       uses: actions/checkout@v6
-
+      with:
+        submodules: recursive
+        
     - name: Setup .NET SDK
       uses: actions/setup-dotnet@v5
       with:
